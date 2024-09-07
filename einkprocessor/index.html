@@ -1,1 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Processing</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: left;
+            margin: 0px;
+        }
+		button {
+			background-color: #007bff; /* Blue background */
+			border: none; /* Remove default border */
+			color: white; /* White text */
+			padding: 10px 20px; /* Padding inside the button */
+			text-align: center; /* Center text */
+			text-decoration: none; /* Remove underline */
+			display: inline-block; /* Align buttons next to each other */
+			font-size: 16px; /* Font size */
+			margin: 5px; /* Margin around buttons */
+			cursor: pointer; /* Pointer cursor on hover */
+			border-radius: 5px; /* Rounded corners */
+			transition: background-color 0.3s ease, transform 0.2s ease; /* Smooth transitions */
+		}
+        canvas {
+            border: 0px solid black;
+            position: relative; /* Ensure the canvas is the relative reference for absolute positioning */
+        }
+        #cropRegion {
+            position: absolute;
+            border: 2px dashed cyan;
+            cursor: move;
+            display: none; /* Initially hidden */
+        }
+        .resizer {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: #1E90FF;
+        }
+        .resizer.se { cursor: se-resize; right: 0; bottom: 0; }
+       // .resizer.sw { cursor: sw-resize; left: 0; bottom: 0; }
+       // .resizer.ne { cursor: ne-resize; right: 0; top: 0; }
+       // .resizer.nw { cursor: nw-resize; left: 0; top: 0; }
+    </style>
+</head>
+<body>
 
+
+	    <canvas id="canvas"></canvas>
+		
+		<div id="cropRegion">
+        <div class="resizer se" data-resize="se"></div>
+        <div class="resizer sw" data-resize="sw"></div>
+        <div class="resizer ne" data-resize="ne"></div>
+        <div class="resizer nw" data-resize="nw"></div>
+		</div>
+	
+
+    <h1>Image Processing for LCD, E-Ink, and Laser</h1>
+	 <input type="file" id="imageInput" accept="image/*">
+	 
+	 <br><br>
+	 
+	<label for="aspectWidth">Aspect Ratio Width:</label>
+    <input type="number" id="aspectWidth" value="800">
+    <label for="aspectHeight">Aspect Ratio Height:</label>
+    <input type="number" id="aspectHeight" value="480">
+    <br><br>
+	<button id="startCropButton">Start Cropping</button>
+    <button id="confirmCropButton" style="background-color:orange">Confirm Crop</button>
+    <button id="resetCropButton" style="background-color:red">Clear Crop</button>
+	
+   
+    
+    <br><br>
+    <label for="brightnessSlider">Adjust Brightness:</label>
+    <input type="range" id="brightnessSlider" min="-100" max="100" value="0">
+    <br><br>
+    <label for="contrastSlider">Adjust Contrast:</label>
+    <input type="range" id="contrastSlider" min="-100" max="100" value="0">
+    <br><br>
+    
+
+    
+
+	
+    <br>
+    
+    
+    <button id="grayscaleButton" style="background-color:black">Convert to Grayscale</button>
+    <button id="binarizeButton" style="background-color:black">Sierra Binarization</button>
+    <button id="saveButton" style="background-color:#02a600">Save Image</button>
+	<br><br>
+    
+    <label>
+        <input type="radio" name="scanDirection" value="horizontal" checked>
+        Horizontal
+    </label>
+    <label>
+        <input type="radio" name="scanDirection" value="vertical">
+        Vertical
+    </label>
+    <button id="saveAsTxtButton">Save as Hex Array (8bit)</button>
+    <script src="js/script.js"></script>
+</body>
+</html>
