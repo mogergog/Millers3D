@@ -321,16 +321,16 @@
             <div class="form-section">
                 <h3>Pattern Start</h3>
                 <div class="form-group">
-                    <label for="firstCheckerX">First Checker X Position (tile):</label>
+                    <label for="firstCheckerX">First Checker/Tile Color:</label>
                     <input type="number" id="firstCheckerX" min="0" max="1" value="0">
                     <small>0 = black, 1 = white</small>
                 </div>
                 
-                <div class="form-group">
+            <!--    <div class="form-group">
                     <label for="firstCheckerY">First Checker Y Position (tile):</label>
                     <input type="number" id="firstCheckerY" min="0" max="1" value="0">
                     <small>0 = black, 1 = white</small>
-                </div>
+                </div> -->
             </div>
             
             <div class="dimensions" id="dimensions">
@@ -575,7 +575,7 @@ function updateDMPreview() {
     const firstDmX = parseInt(document.getElementById('firstDmX').value);
     const firstDmY = parseInt(document.getElementById('firstDmY').value);
     const firstCheckerX = parseInt(document.getElementById('firstCheckerX').value);
-    const firstCheckerY = parseInt(document.getElementById('firstCheckerY').value);
+    const firstCheckerY = 0; //parseInt(document.getElementById('firstCheckerY').value);
     const border = parseInt(document.getElementById('border').value);
     const colorScheme = document.getElementById('colorScheme').value;
     const dmStepX = parseInt(document.getElementById('dmStepX').value);
