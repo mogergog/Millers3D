@@ -190,6 +190,10 @@
     #generateBtn:hover {
         background-color: #FFED33;
     }
+	.form-group label input[type="checkbox"] {
+    width: auto;
+    margin-right: 8px;
+	}
 </style>
 
 </head>
@@ -216,28 +220,49 @@
     <div class="controls">
         <div class="controls-content">
             <h2>Plate Parameters</h2>
+			
+			<div class="form-section">
+				<h3>Target Size</h3>
+				<div class="form-group">
+					<label for="targetWidth">Target Checkerboard Width (mm):</label>
+					<input type="number" id="targetWidth" min="10" max="1000" value="100" step="1">
+				</div>
+				
+				<div class="form-group">
+					<label for="targetHeight">Target Checkerboard Height (mm):</label>
+					<input type="number" id="targetHeight" min="10" max="1000" value="100" step="1">
+				</div>
+				
+				<div class="form-group">
+					<label for="autoCalculate">
+						<input type="checkbox" id="autoCalculate" checked> Auto rows/columns
+					</label>
+				</div>
+			</div>
             
             <div class="form-section">
                 <h3>Checkerboard</h3>
-                <div class="form-group">
-                    <label for="rows">Number of Rows (+Border):</label>
-                    <input type="number" id="rows" min="10" max="100" value="21">
-                </div>
-                
-                <div class="form-group">
-                    <label for="cols">Number of Columns (+Border):</label>
-                    <input type="number" id="cols" min="10" max="100" value="21">
-                </div>
+				<div class="form-group">
+					<label for="cols">Number of Columns (checkerboard only):</label>
+					<input type="number" id="cols" min="8" max="100" value="20">
+				</div>
+				
+				<div class="form-group">
+					<label for="rows">Number of Rows (checkerboard only):</label>
+					<input type="number" id="rows" min="8" max="100" value="20">
+				</div>
+				
+
                 
                 <div class="form-group">
                     <label for="tileSize">Tile Size (mm):</label>
                     <input type="number" id="tileSize" min="1" max="100" value="5" step="0.1">
                 </div>
                 
-                <div class="form-group">
-                    <label for="border">Border Size (tiles):</label>
-                    <input type="number" id="border" min="0" max="100" value="1">
-                </div>
+				<div class="form-group">
+					<label for="border">Border Size (tiles around checkerboard):</label>
+					<input type="number" id="border" min="0" max="10" value="1">
+				</div>
                 
                 <div class="form-group">
                     <label for="colorScheme">Color Scheme:</label>
@@ -269,22 +294,22 @@
                 
                 <div class="form-group">
                     <label for="firstDmX">First Code Center X (tile position):</label>
-                    <input type="number" id="firstDmX" min="0" max="20" value="6">
+                    <input type="number" id="firstDmX" min="0" max="20" value="5">
                 </div>
                 
                 <div class="form-group">
                     <label for="firstDmY">First Code Center Y (tile position):</label>
-                    <input type="number" id="firstDmY" min="0" max="20" value="6">
+                    <input type="number" id="firstDmY" min="0" max="20" value="5">
                 </div>
                 
                 <div class="form-group">
                     <label for="dmStepX">X Step (tiles):</label>
-                    <input type="number" id="dmStepX" min="1" max="50" value="9">
+                    <input type="number" id="dmStepX" min="1" max="50" value="10">
                 </div>
 
                 <div class="form-group">
                     <label for="dmStepY">Y Step (tiles):</label>
-                    <input type="number" id="dmStepY" min="1" max="50" value="9">
+                    <input type="number" id="dmStepY" min="1" max="50" value="10">
                 </div>
             </div>
             
@@ -344,12 +369,6 @@
             const downloadPNGBtn = document.getElementById('downloadPNGBtn');
             const downloadPDFBtn = document.getElementById('downloadPDFBtn');
             
-        //    // Add event listeners to parameters that affect DataMatrix positioning
-        //    const dmParams = ['dmSize', 'dmCount', 'dmScale', 'firstDmX', 'firstDmY', 'rows', 'cols', 'border'];
-        //    dmParams.forEach(param => {
-        //        document.getElementById(param).addEventListener('change', updateDMPreview);
-        //    });
-            
 			// Add event listeners to parameters that affect DataMatrix positioning
 			const dmParams = ['dmSize', 'dmCount', 'dmScale', 'firstDmX', 'firstDmY', 'rows', 'cols', 'border', 'dmStepX', 'dmStepY'];
 			dmParams.forEach(param => {
@@ -360,11 +379,74 @@
             downloadBtn.addEventListener('click', downloadSVG);
             downloadPNGBtn.addEventListener('click', downloadPNG);
             downloadPDFBtn.addEventListener('click', downloadPDF);
-            
+			
+			
+			// Add new event listeners for target size and tile size
+			document.getElementById('targetWidth').addEventListener('change', updateRowsColsFromTarget);
+			document.getElementById('targetHeight').addEventListener('change', updateRowsColsFromTarget);
+			document.getElementById('tileSize').addEventListener('change', updateRowsColsFromTarget);
+			document.getElementById('autoCalculate').addEventListener('change', function() {
+				if (this.checked) {
+					updateRowsColsFromTarget();
+				}
+			});
+			
+			    // Add these right after the above listeners
+			document.getElementById('rows').addEventListener('change', function() {
+				if (!document.getElementById('autoCalculate').checked) {
+					updateTargetFromRowsCols();
+				}
+				updateDMPreview();
+			});
+		
+			document.getElementById('cols').addEventListener('change', function() {
+				if (!document.getElementById('autoCalculate').checked) {
+					updateTargetFromRowsCols();
+				}
+				updateDMPreview();
+			});
+			
+            // Initial calculation
+			updateRowsColsFromTarget();
             // Generate initial plate
             generateCheckerboard();
             updateDMPreview();
-            
+
+
+function updateRowsColsFromTarget() {
+    if (!document.getElementById('autoCalculate').checked) return;
+
+    const targetWidth = parseFloat(document.getElementById('targetWidth').value);
+    const targetHeight = parseFloat(document.getElementById('targetHeight').value);
+    const tileSize = parseFloat(document.getElementById('tileSize').value);
+
+    if (tileSize <= 0) return;
+
+    // Calculate rows and columns (round to nearest integer)
+    const cols = Math.round(targetWidth / tileSize);
+    const rows = Math.round(targetHeight / tileSize);
+
+    // Update the inputs (minimum of 8 rows/columns)
+    document.getElementById('cols').value = Math.max(8, cols);
+    document.getElementById('rows').value = Math.max(8, rows);
+
+    // Trigger preview update
+    updateDMPreview();
+}
+
+function updateTargetFromRowsCols() {
+    const cols = parseInt(document.getElementById('cols').value);
+    const rows = parseInt(document.getElementById('rows').value);
+    const tileSize = parseFloat(document.getElementById('tileSize').value);
+
+    // Update target dimensions (read-only when auto-calculate is on)
+    if (!document.getElementById('autoCalculate').checked) {
+        document.getElementById('targetWidth').value = (cols * tileSize).toFixed(1);
+        document.getElementById('targetHeight').value = (rows * tileSize).toFixed(1);
+    }
+} 
+
+ 
 function updateDMPreview() {
     const dmSize = parseInt(document.getElementById('dmSize').value);
     const dmCount = parseInt(document.getElementById('dmCount').value);
@@ -376,8 +458,12 @@ function updateDMPreview() {
     const dmStepX = parseInt(document.getElementById('dmStepX').value);
     const dmStepY = parseInt(document.getElementById('dmStepY').value);
     const tileSize = parseFloat(document.getElementById('tileSize').value);
-	
-	if (dmSize % 2 !== 0) {
+    
+    // Calculate total rows/columns including borders
+    const totalRows = rows + 2 * border;
+    const totalCols = cols + 2 * border;
+    
+    if (dmSize % 2 !== 0) {
         document.getElementById('dmPreview').innerHTML = 
             '<p class="error">Error: DataMatrix code size must be even</p>';
         return;
@@ -386,17 +472,17 @@ function updateDMPreview() {
     // Calculate positions for DataMatrix codes
     const dmPositions = [];
     if (dmCount > 0) {
-        // First DataMatrix at specified center position
-        const centerX = firstDmX;
-        const centerY = firstDmY;
+        // First DataMatrix at specified center position (relative to checkerboard)
+        const centerX = firstDmX + border; // Add border offset
+        const centerY = firstDmY + border; // Add border offset
         
         // Calculate top-left corner of first DataMatrix
         const firstX = centerX - Math.floor(dmSize/2);
         const firstY = centerY - Math.floor(dmSize/2);
         
         // Add first DataMatrix if it fits
-        if (firstX >= border && firstX + dmSize <= cols - border &&
-            firstY >= border && firstY + dmSize <= rows - border) {
+        if (firstX >= border && firstX + dmSize <= totalCols - border &&
+            firstY >= border && firstY + dmSize <= totalRows - border) {
             dmPositions.push({
                 x: firstX,
                 y: firstY,
@@ -446,7 +532,7 @@ function updateDMPreview() {
     }
     
     // Create preview
-    const preview = document.getElementById('dmPreview');
+     const preview = document.getElementById('dmPreview');
     preview.innerHTML = '';
     
     if (dmPositions.length === 0) {
@@ -459,8 +545,8 @@ function updateDMPreview() {
         posDiv.className = 'dm-preview-item';
         posDiv.innerHTML = `
             <strong>DataMatrix ${dmPositions.indexOf(pos) + 1}</strong><br>
-            Position: (${pos.x -border}, ${pos.y-border}) to (${pos.x + dmSize -border}, ${pos.y + dmSize-border})<br>
-            Center: (X${pos.centerX}, Y${pos.centerY})<br>
+            Position: (${pos.x - border}, ${pos.y - border}) to (${pos.x + dmSize - border}, ${pos.y + dmSize - border})<br>
+            Center: (X${pos.centerX - border}, Y${pos.centerY - border})<br>
             Content: ${pos.centerX - border}, ${pos.centerY - border} V1 P${tileSize} MM
         `;
         preview.appendChild(posDiv);
@@ -468,6 +554,11 @@ function updateDMPreview() {
 }
             
             function generateCheckerboard() {
+			
+			    // If auto-calculate is on, update rows/columns first
+    if (document.getElementById('autoCalculate').checked) {
+        updateRowsColsFromTarget();
+    }
     const rows = parseInt(document.getElementById('rows').value);
     const cols = parseInt(document.getElementById('cols').value);
     const tileSize = parseFloat(document.getElementById('tileSize').value);
@@ -484,16 +575,20 @@ function updateDMPreview() {
     const dmStepX = parseInt(document.getElementById('dmStepX').value);
     const dmStepY = parseInt(document.getElementById('dmStepY').value);
 
+    // Calculate total rows/columns including borders
+    const totalRows = rows + 2 * border;
+    const totalCols = cols + 2 * border;
+
     // Validate inputs
-    if (rows < 10 || cols < 10) {
-        alert("Minimum rows and columns is 10");
+    if (rows < 8 || cols < 8) {
+        alert("Minimum rows and columns is 8");
         return;
     }
 
-	if (dmSize < 2 || dmSize > 100 || dmSize % 2 !== 0) {
-		alert("DataMatrix code size must be an even number between 2 and 100");
-		return;
-	}
+    if (dmSize < 2 || dmSize > 100 || dmSize % 2 !== 0) {
+        alert("DataMatrix code size must be an even number between 2 and 100");
+        return;
+    }
 
     if (dmCount < 1 || dmCount > 100) {
         alert("Number of DataMatrix codes must be between 1 and 100");
@@ -506,10 +601,10 @@ function updateDMPreview() {
     }
 
     // Calculate plate dimensions in mm
-    const width = cols * tileSize;
-    const height = rows * tileSize;
+    const width = totalCols * tileSize;
+    const height = totalRows * tileSize;
     document.getElementById('dimensions').textContent = 
-        `Plate dimensions: ${width.toFixed(1)} mm × ${height.toFixed(1)} mm`;
+        `Plate dimensions: ${width.toFixed(1)} mm × ${height.toFixed(1)} mm (${cols}×${rows} checkerboard + ${border} tile border)`;
 
     // Create SVG
     const svgNS = "http://www.w3.org/2000/svg";
@@ -531,17 +626,17 @@ function updateDMPreview() {
     // Calculate positions for DataMatrix codes with proper stepping
     const dmPositions = [];
     if (dmCount > 0) {
-        // First DataMatrix at specified center position
-        const centerX = firstDmX;
-        const centerY = firstDmY;
+        // First DataMatrix at specified center position (relative to checkerboard)
+        const centerX = firstDmX + border; // Add border offset
+        const centerY = firstDmY + border; // Add border offset
         
         // Calculate top-left corner of first DataMatrix
         const firstX = centerX - Math.floor(dmSize/2);
         const firstY = centerY - Math.floor(dmSize/2);
         
         // Add first DataMatrix if it fits
-        if (firstX >= border && firstX + dmSize <= cols - border &&
-            firstY >= border && firstY + dmSize <= rows - border) {
+        if (firstX >= border && firstX + dmSize <= totalCols - border &&
+            firstY >= border && firstY + dmSize <= totalRows - border) {
             dmPositions.push({
                 x: firstX,
                 y: firstY,
@@ -556,8 +651,8 @@ function updateDMPreview() {
             let count = 0;
             
             // Calculate how many can fit in x and y directions
-            const maxX = Math.floor((cols - border - firstX - dmSize) / dmStepX) + 1;
-            const maxY = Math.floor((rows - border - firstY - dmSize) / dmStepY) + 1;
+            const maxX = Math.floor((totalCols - border - firstX - dmSize) / dmStepX) + 1;
+            const maxY = Math.floor((totalRows - border - firstY - dmSize) / dmStepY) + 1;
             
             // Place in grid pattern
             outer: for (let yStep = 0; yStep < maxY; yStep++) {
@@ -571,8 +666,8 @@ function updateDMPreview() {
                     if (xStep === 0 && yStep === 0) continue;
                     
                     // Check if position is valid
-                    if (x >= border && x + dmSize <= cols - border &&
-                        y >= border && y + dmSize <= rows - border) {
+                    if (x >= border && x + dmSize <= totalCols - border &&
+                        y >= border && y + dmSize <= totalRows - border) {
                         
                         const centerX = x + Math.floor(dmSize/2);
                         const centerY = y + Math.floor(dmSize/2);
@@ -590,14 +685,9 @@ function updateDMPreview() {
         }
     }
 
-    // Create checkerboard pattern
-    for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-            // Skip border if specified
-            if (x < border || x >= cols - border || y < border || y >= rows - border) {
-                continue;
-            }
-            
+    // Create checkerboard pattern (only in the non-border area)
+    for (let y = border; y < border + rows; y++) {
+        for (let x = border; x < border + cols; x++) {
             // Skip areas where DataMatrix codes will be placed
             let inDMArea = false;
             for (const pos of dmPositions) {
@@ -610,7 +700,7 @@ function updateDMPreview() {
             if (inDMArea) continue;
             
             // Determine tile color
-            const isBlack = (x + firstCheckerX + y + firstCheckerY) % 2 === (colorScheme === 'black' ? 0 : 1);
+            const isBlack = (x - border + firstCheckerX + y - border + firstCheckerY) % 2 === (colorScheme === 'black' ? 0 : 1);
             const rect = document.createElementNS(svgNS, "rect");
             rect.setAttribute("x", x * tileSize);
             rect.setAttribute("y", y * tileSize);
@@ -620,6 +710,7 @@ function updateDMPreview() {
             svg.appendChild(rect);
         }
     }
+
 
     // Add DataMatrix codes
     dmPositions.forEach((pos, index) => {
@@ -749,8 +840,8 @@ function updateDMPreview() {
     infoText.setAttribute("text-anchor", "middle");
     infoText.setAttribute("fill", colorScheme === 'black' ? 'black' : 'white');
     const plateText = width > 100 ? 
-        `COGNEX WH: ${(cols-border)*tileSize}x${(rows-border)*tileSize} | ${cols-border}×${rows-border} tiles | ${tileSize}mm tiles` :
-        `${cols}×${rows} | ${tileSize}mm | ${gridPitch}mm`;
+        `COGNEX Margin:${(border*tileSize)}mm_WH:${(cols)*tileSize}x${(rows)*tileSize}mm_Tiles:${cols}×${rows}_Pitch:${tileSize}mm_DMSize:${dmSize * tileSize * dmScale}mm_Mod:${dmSize * tileSize * dmScale/16}mm` :
+        `COGNEX WH:${(cols)*tileSize}x${(rows)*tileSize}mm |T:${cols}×${rows} | TS:${tileSize}mm`;
     infoText.textContent = plateText;
     svg.appendChild(infoText);
 
@@ -788,30 +879,6 @@ function updateDMPreview() {
 				link.click();
 				document.body.removeChild(link);
 			}
-            
-          //  function downloadSVG() {
-          //      const svg = document.getElementById('checkerboard').querySelector('svg');
-          //      const serializer = new XMLSerializer();
-          //      let source = serializer.serializeToString(svg);
-          //      
-          //      // Add namespace if not present
-          //      if (!source.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
-          //          source = source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
-          //      }
-          //      
-          //      // Add XML declaration
-          //      source = '<?xml version="1.0" standalone="no"?>\r\n' + source;
-          //      
-          //      // Convert to blob and download
-          //      const blob = new Blob([source], {type: 'image/svg+xml;charset=utf-8'});
-          //      const url = URL.createObjectURL(blob);
-          //      const link = document.createElement('a');
-          //      link.href = url;
-          //      link.download = 'calibration_plate.svg';
-          //      document.body.appendChild(link);
-          //      link.click();
-          //      document.body.removeChild(link);
-          //  }
             
             function downloadPNG() {
                 const svg = document.getElementById('checkerboard').querySelector('svg');
