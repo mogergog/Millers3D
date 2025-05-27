@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checkerboard with DataMatrix Calibration Plate Generator</title>
+    <script src="Scripts/jsbarcode_3_11_5/dist/JsBarcode.all.min.js"></script>
+    <script src="Scripts/html2canvas.min.js"></script>
+    <script src="Scripts/jspdf.umd.min.js"></script>
+    <script src="Scripts/bwip-js-master/dist/bwip-js-min.js"></script>
+    <style>
+    body {
+        font-family: Arial, sans-serif;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+        line-height: 1.6;
+        background-color: #f8f8f8;
+    }
+    h1, h2 {
+        color: #333;
+    }
+    .container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+        height: calc(100vh - 180px);
+    }
+    .controls {
+        flex: 1;
+        min-width: 300px;
+        background: white;
+        padding: 20px;
+        border-radius: 5px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+        max-height: 100%;
+        border: 1px solid #e0e0e0;
+    }
+    .controls-content {
+        flex: 1;
+        overflow-y: auto;
+        padding-right: 10px;
+    }
+    .preview {
+        flex: 2;
+        min-width: 400px;
+        background: white;
+        padding: 20px;
+        border-radius: 5px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+        max-height: 100%;
+        border: 1px solid #e0e0e0;
+    }
+    .form-group {
+        margin-bottom: 15px;
+    }
+    label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        font-size: 14px;
+        color: #333;
+    }
+    input, select {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-sizing: border-box;
+        font-size: 14px;
+    }
+    button {
+        background-color: #333;
+        color: #fff;
+        border: none;
+        padding: 10px 15px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+        margin-top: 10px;
+        transition: all 0.2s;
+        font-weight: 600;
+    }
+    button:hover {
+        background-color: #555;
+    }
+    #checkerboard {
+        width: 100%;
+        overflow: visible;
+    }
+    #checkerboard svg {
+        width: 100%;
+        height: auto;
+        max-width: 100%;
+        display: block;
+    }
+    .download-btn {
+        background-color: #FFE600;
+        color: #333;
+    }
+    .download-btn:hover {
+        background-color: #FFED33;
+    }
+    .download-pdf-btn {
+        background-color: #333;
+        color: #FFE600;
+    }
+    .download-pdf-btn:hover {
+        background-color: #555;
+        color: #FFED33;
+    }
+    .info {
+        background-color: #FFF9CC;
+        padding: 15px;
+        border-left: 4px solid #FFE600;
+        margin: 20px 0;
+        font-size: 14px;
+    }
+    .dimensions {
+        font-size: 14px;
+        color: #666;
+        margin: 15px 0;
+        padding: 10px;
+        background: #FFF9CC;
+        border-radius: 4px;
+        border-left: 3px solid #FFE600;
+    }
+    .button-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 15px 0;
+    }
+    .button-group button {
+        margin: 0;
+        flex: 1;
+        min-width: 120px;
+    }
+    .dm-preview {
+        margin-top: 20px;
+        padding: 15px;
+        background: #FFF9CC;
+        border-radius: 4px;
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #FFE600;
+    }
+    .dm-preview h3 {
+        margin-top: 0;
+        font-size: 16px;
+        color: #333;
+    }
+    .dm-preview-item {
+        border: 1px solid #FFE600;
+        padding: 8px;
+        margin-bottom: 8px;
+        border-radius: 4px;
+        background: white;
+        font-size: 13px;
+    }
+    .form-section {
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom: 1px solid #eee;
+    }
+    .form-section h3 {
+        margin-top: 0;
+        color: #333;
+        font-size: 16px;
+        border-bottom: 2px solid #FFE600;
+        padding-bottom: 5px;
+        display: inline-block;
+    }
+    small {
+        font-size: 12px;
+        color: #666;
+    }
+    .error {
+        color: #d9534f;
+        font-weight: bold;
+    }
+    #generateBtn {
+        background-color: #FFE600;
+        color: #333;
+    }
+    #generateBtn:hover {
+        background-color: #FFED33;
+    }
+</style>
+
+</head>
+
+<body>
+    <h1>Checkerboard with DataMatrix Calibration Plate Generator</h1>
+    <p>Create a calibration plate that meets Cognex VisionPro requirements for checkerboard plates with DataMatrix fiducial marks.</p>
+    
+   <!-- <div class="info">
+        <h2>Requirements Summary</h2>
+        <ul>
+            <li>Black and white tiles must alternate and be the same size</li>
+            <li>Tiles should be square (aspect ratio 0.9-1.1)</li>
+            <li>Image must include at least 9 full tiles</li>
+            <li>Tiles in image must be at least 15×15 pixels</li>
+            <li>DataMatrix codes mark grid vertices and specify grid pitch</li>
+            <li>No checker pattern behind DataMatrix codes</li>
+            <li>DataMatrix center should be at specific tile intersections</li>
+            <li>DataMatrix content should encode checker counts to center point</li>
+        </ul>
+    </div> -->
+    
+    <div class="container">
+    <div class="controls">
+        <div class="controls-content">
+            <h2>Plate Parameters</h2>
+            
+            <div class="form-section">
+                <h3>Checkerboard</h3>
+                <div class="form-group">
+                    <label for="rows">Number of Rows (+Border):</label>
+                    <input type="number" id="rows" min="10" max="100" value="21">
+                </div>
+                
+                <div class="form-group">
+                    <label for="cols">Number of Columns (+Border):</label>
+                    <input type="number" id="cols" min="10" max="100" value="21">
+                </div>
+                
+                <div class="form-group">
+                    <label for="tileSize">Tile Size (mm):</label>
+                    <input type="number" id="tileSize" min="1" max="100" value="5" step="0.1">
+                </div>
+                
+                <div class="form-group">
+                    <label for="border">Border Size (tiles):</label>
+                    <input type="number" id="border" min="0" max="100" value="1">
+                </div>
+                
+                <div class="form-group">
+                    <label for="colorScheme">Color Scheme:</label>
+                    <select id="colorScheme">
+                        <option value="black">Black tiles on white background</option>
+                        <option value="white">White tiles on black background</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="form-section">
+                <h3>DataMatrix Codes</h3>
+				<div class="form-group">
+					<label for="dmSize">Code Size (tiles):</label>
+					<input type="number" id="dmSize" min="2" max="100" value="4" step="2">
+					<small>Must be even number (2, 4, 6, etc.)</small>
+				</div>
+                
+                <div class="form-group">
+                    <label for="dmCount">Number of Codes:</label>
+                    <input type="number" id="dmCount" min="1" max="500" value="4">
+                </div>
+                
+                <div class="form-group">
+                    <label for="dmScale">Scale (% of tile area):</label>
+                    <input type="number" id="dmScale" min="20" max="90" value="70" step="5">
+                    <small>Size of DataMatrix relative to its allocated tile area</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="firstDmX">First Code Center X (tile position):</label>
+                    <input type="number" id="firstDmX" min="0" max="20" value="6">
+                </div>
+                
+                <div class="form-group">
+                    <label for="firstDmY">First Code Center Y (tile position):</label>
+                    <input type="number" id="firstDmY" min="0" max="20" value="6">
+                </div>
+                
+                <div class="form-group">
+                    <label for="dmStepX">X Step (tiles):</label>
+                    <input type="number" id="dmStepX" min="1" max="50" value="9">
+                </div>
+
+                <div class="form-group">
+                    <label for="dmStepY">Y Step (tiles):</label>
+                    <input type="number" id="dmStepY" min="1" max="50" value="9">
+                </div>
+            </div>
+            
+            <div class="form-section">
+                <h3>Pattern Start</h3>
+                <div class="form-group">
+                    <label for="firstCheckerX">First Checker X Position (tile):</label>
+                    <input type="number" id="firstCheckerX" min="0" max="1" value="0">
+                    <small>0 = black, 1 = white</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="firstCheckerY">First Checker Y Position (tile):</label>
+                    <input type="number" id="firstCheckerY" min="0" max="1" value="0">
+                    <small>0 = black, 1 = white</small>
+                </div>
+            </div>
+            
+            <div class="dimensions" id="dimensions">
+                Plate dimensions: 0 mm × 0 mm
+            </div>
+            
+            <div class="dm-preview">
+                <h3>DataMatrix Position Preview</h3>
+                <div id="dmPreview"></div>
+            </div>
+        </div>
+        
+        <div>
+            <button id="generateBtn">Generate Plate</button>
+            
+            <div class="button-group">
+                <button id="downloadBtn" class="download-btn">Download SVG</button>
+                <button id="downloadPNGBtn" class="download-btn">Download PNG</button>
+                <button id="downloadPDFBtn" class="download-pdf-btn">Download PDF</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="preview">
+        <h2>Preview</h2>
+        <div class="preview-content">
+            <div id="checkerboard-container">
+                <div id="checkerboard"></div>
+            </div>
+        </div>
+    </div>
+</div>
+    
+    <script>
+        // Initialize jsPDF
+        const { jsPDF } = window.jspdf;
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            const generateBtn = document.getElementById('generateBtn');
+            const downloadBtn = document.getElementById('downloadBtn');
+            const downloadPNGBtn = document.getElementById('downloadPNGBtn');
+            const downloadPDFBtn = document.getElementById('downloadPDFBtn');
+            
+        //    // Add event listeners to parameters that affect DataMatrix positioning
+        //    const dmParams = ['dmSize', 'dmCount', 'dmScale', 'firstDmX', 'firstDmY', 'rows', 'cols', 'border'];
+        //    dmParams.forEach(param => {
+        //        document.getElementById(param).addEventListener('change', updateDMPreview);
+        //    });
+            
+			// Add event listeners to parameters that affect DataMatrix positioning
+			const dmParams = ['dmSize', 'dmCount', 'dmScale', 'firstDmX', 'firstDmY', 'rows', 'cols', 'border', 'dmStepX', 'dmStepY'];
+			dmParams.forEach(param => {
+				document.getElementById(param).addEventListener('change', updateDMPreview);
+			});
+			
+            generateBtn.addEventListener('click', generateCheckerboard);
+            downloadBtn.addEventListener('click', downloadSVG);
+            downloadPNGBtn.addEventListener('click', downloadPNG);
+            downloadPDFBtn.addEventListener('click', downloadPDF);
+            
+            // Generate initial plate
+            generateCheckerboard();
+            updateDMPreview();
+            
+function updateDMPreview() {
+    const dmSize = parseInt(document.getElementById('dmSize').value);
+    const dmCount = parseInt(document.getElementById('dmCount').value);
+    const firstDmX = parseInt(document.getElementById('firstDmX').value);
+    const firstDmY = parseInt(document.getElementById('firstDmY').value);
+    const rows = parseInt(document.getElementById('rows').value);
+    const cols = parseInt(document.getElementById('cols').value);
+    const border = parseInt(document.getElementById('border').value);
+    const dmStepX = parseInt(document.getElementById('dmStepX').value);
+    const dmStepY = parseInt(document.getElementById('dmStepY').value);
+    const tileSize = parseFloat(document.getElementById('tileSize').value);
+	
+	if (dmSize % 2 !== 0) {
+        document.getElementById('dmPreview').innerHTML = 
+            '<p class="error">Error: DataMatrix code size must be even</p>';
+        return;
+    }
+    
+    // Calculate positions for DataMatrix codes
+    const dmPositions = [];
+    if (dmCount > 0) {
+        // First DataMatrix at specified center position
+        const centerX = firstDmX;
+        const centerY = firstDmY;
+        
+        // Calculate top-left corner of first DataMatrix
+        const firstX = centerX - Math.floor(dmSize/2);
+        const firstY = centerY - Math.floor(dmSize/2);
+        
+        // Add first DataMatrix if it fits
+        if (firstX >= border && firstX + dmSize <= cols - border &&
+            firstY >= border && firstY + dmSize <= rows - border) {
+            dmPositions.push({
+                x: firstX,
+                y: firstY,
+                centerX: centerX,
+                centerY: centerY
+            });
+        }
+        
+        // Add additional DataMatrix codes in grid pattern
+        const remaining = dmCount - dmPositions.length;
+        if (remaining > 0) {
+            let count = 0;
+            
+            // Calculate how many can fit in x and y directions
+            const maxX = Math.floor((cols - border - firstX - dmSize) / dmStepX) + 1;
+            const maxY = Math.floor((rows - border - firstY - dmSize) / dmStepY) + 1;
+            
+            // Place in grid pattern
+            outer: for (let yStep = 0; yStep < maxY; yStep++) {
+                for (let xStep = 0; xStep < maxX; xStep++) {
+                    if (count >= remaining) break outer;
+                    
+                    const x = firstX + xStep * dmStepX;
+                    const y = firstY + yStep * dmStepY;
+                    
+                    // Skip if overlaps with first one
+                    if (xStep === 0 && yStep === 0) continue;
+                    
+                    // Check if position is valid
+                    if (x >= border && x + dmSize <= cols - border &&
+                        y >= border && y + dmSize <= rows - border) {
+                        
+                        const centerX = x + Math.floor(dmSize/2);
+                        const centerY = y + Math.floor(dmSize/2);
+                        
+                        dmPositions.push({
+                            x: x,
+                            y: y,
+                            centerX: centerX,
+                            centerY: centerY
+                        });
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Create preview
+    const preview = document.getElementById('dmPreview');
+    preview.innerHTML = '';
+    
+    if (dmPositions.length === 0) {
+        preview.innerHTML = '<p>No DataMatrix codes will be generated with current settings.</p>';
+        return;
+    }
+    
+    dmPositions.forEach(pos => {
+        const posDiv = document.createElement('div');
+        posDiv.className = 'dm-preview-item';
+        posDiv.innerHTML = `
+            <strong>DataMatrix ${dmPositions.indexOf(pos) + 1}</strong><br>
+            Position: (${pos.x -border}, ${pos.y-border}) to (${pos.x + dmSize -border}, ${pos.y + dmSize-border})<br>
+            Center: (X${pos.centerX}, Y${pos.centerY})<br>
+            Content: ${pos.centerX - border}, ${pos.centerY - border} V1 P${tileSize} MM
+        `;
+        preview.appendChild(posDiv);
+    });
+}
+            
+            function generateCheckerboard() {
+    const rows = parseInt(document.getElementById('rows').value);
+    const cols = parseInt(document.getElementById('cols').value);
+    const tileSize = parseFloat(document.getElementById('tileSize').value);
+    const gridPitch = tileSize;
+    const dmSize = parseInt(document.getElementById('dmSize').value);
+    const dmCount = parseInt(document.getElementById('dmCount').value);
+    const dmScale = parseInt(document.getElementById('dmScale').value) / 100;
+    const firstDmX = parseInt(document.getElementById('firstDmX').value);
+    const firstDmY = parseInt(document.getElementById('firstDmY').value);
+    const firstCheckerX = parseInt(document.getElementById('firstCheckerX').value);
+    const firstCheckerY = parseInt(document.getElementById('firstCheckerY').value);
+    const border = parseInt(document.getElementById('border').value);
+    const colorScheme = document.getElementById('colorScheme').value;
+    const dmStepX = parseInt(document.getElementById('dmStepX').value);
+    const dmStepY = parseInt(document.getElementById('dmStepY').value);
+
+    // Validate inputs
+    if (rows < 10 || cols < 10) {
+        alert("Minimum rows and columns is 10");
+        return;
+    }
+
+	if (dmSize < 2 || dmSize > 100 || dmSize % 2 !== 0) {
+		alert("DataMatrix code size must be an even number between 2 and 100");
+		return;
+	}
+
+    if (dmCount < 1 || dmCount > 100) {
+        alert("Number of DataMatrix codes must be between 1 and 100");
+        return;
+    }
+
+    if (border < 0 || border > 10) {
+        alert("Border size must be between 0 and 10 tiles");
+        return;
+    }
+
+    // Calculate plate dimensions in mm
+    const width = cols * tileSize;
+    const height = rows * tileSize;
+    document.getElementById('dimensions').textContent = 
+        `Plate dimensions: ${width.toFixed(1)} mm × ${height.toFixed(1)} mm`;
+
+    // Create SVG
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", `${width}mm`);
+    svg.setAttribute("height", `${height}mm`);
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    // Background
+    const bg = document.createElementNS(svgNS, "rect");
+    bg.setAttribute("x", "0");
+    bg.setAttribute("y", "0");
+    bg.setAttribute("width", width);
+    bg.setAttribute("height", height);
+    bg.setAttribute("fill", colorScheme === 'black' ? 'white' : 'black');
+    svg.appendChild(bg);
+
+    // Calculate positions for DataMatrix codes with proper stepping
+    const dmPositions = [];
+    if (dmCount > 0) {
+        // First DataMatrix at specified center position
+        const centerX = firstDmX;
+        const centerY = firstDmY;
+        
+        // Calculate top-left corner of first DataMatrix
+        const firstX = centerX - Math.floor(dmSize/2);
+        const firstY = centerY - Math.floor(dmSize/2);
+        
+        // Add first DataMatrix if it fits
+        if (firstX >= border && firstX + dmSize <= cols - border &&
+            firstY >= border && firstY + dmSize <= rows - border) {
+            dmPositions.push({
+                x: firstX,
+                y: firstY,
+                centerX: centerX,
+                centerY: centerY
+            });
+        }
+        
+        // Add additional DataMatrix codes in grid pattern
+        const remaining = dmCount - dmPositions.length;
+        if (remaining > 0) {
+            let count = 0;
+            
+            // Calculate how many can fit in x and y directions
+            const maxX = Math.floor((cols - border - firstX - dmSize) / dmStepX) + 1;
+            const maxY = Math.floor((rows - border - firstY - dmSize) / dmStepY) + 1;
+            
+            // Place in grid pattern
+            outer: for (let yStep = 0; yStep < maxY; yStep++) {
+                for (let xStep = 0; xStep < maxX; xStep++) {
+                    if (count >= remaining) break outer;
+                    
+                    const x = firstX + xStep * dmStepX;
+                    const y = firstY + yStep * dmStepY;
+                    
+                    // Skip if overlaps with first one
+                    if (xStep === 0 && yStep === 0) continue;
+                    
+                    // Check if position is valid
+                    if (x >= border && x + dmSize <= cols - border &&
+                        y >= border && y + dmSize <= rows - border) {
+                        
+                        const centerX = x + Math.floor(dmSize/2);
+                        const centerY = y + Math.floor(dmSize/2);
+                        
+                        dmPositions.push({
+                            x: x,
+                            y: y,
+                            centerX: centerX,
+                            centerY: centerY
+                        });
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+
+    // Create checkerboard pattern
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            // Skip border if specified
+            if (x < border || x >= cols - border || y < border || y >= rows - border) {
+                continue;
+            }
+            
+            // Skip areas where DataMatrix codes will be placed
+            let inDMArea = false;
+            for (const pos of dmPositions) {
+                if (x >= pos.x && x < pos.x + dmSize && 
+                    y >= pos.y && y < pos.y + dmSize) {
+                    inDMArea = true;
+                    break;
+                }
+            }
+            if (inDMArea) continue;
+            
+            // Determine tile color
+            const isBlack = (x + firstCheckerX + y + firstCheckerY) % 2 === (colorScheme === 'black' ? 0 : 1);
+            const rect = document.createElementNS(svgNS, "rect");
+            rect.setAttribute("x", x * tileSize);
+            rect.setAttribute("y", y * tileSize);
+            rect.setAttribute("width", tileSize);
+            rect.setAttribute("height", tileSize);
+            rect.setAttribute("fill", isBlack ? 'black' : 'white');
+            svg.appendChild(rect);
+        }
+    }
+
+    // Add DataMatrix codes
+    dmPositions.forEach((pos, index) => {
+        const dmWidth = dmSize * tileSize * dmScale;
+        const dmHeight = dmSize * tileSize * dmScale;
+    
+        const dmX = pos.x * tileSize + (dmSize * tileSize - dmWidth) / 2;
+        const dmY = pos.y * tileSize + (dmSize * tileSize - dmHeight) / 2;
+        const centerX = dmX + dmWidth / 2;
+        const centerY = dmY + dmHeight / 2;
+    
+        // White background
+        const bg = document.createElementNS(svgNS, "rect");
+        bg.setAttribute("x", pos.x * tileSize);
+        bg.setAttribute("y", pos.y * tileSize);
+        bg.setAttribute("width", dmSize * tileSize);
+        bg.setAttribute("height", dmSize * tileSize);
+        bg.setAttribute("fill", "white");
+        svg.appendChild(bg);
+    
+        // DataMatrix content
+        const dmContent = `${pos.centerX - border}, ${pos.centerY - border} V1 P${tileSize} MM`;
+    
+        try {
+            // Generate SVG markup from bwip-js
+            const svgMarkup = bwipjs.toSVG({
+                bcid: 'datamatrix',
+                text: dmContent,
+                scale: 3,
+                includetext: false,
+                textxalign: 'center',
+            });
+    
+            // Parse the SVG string into DOM elements
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(svgMarkup, "image/svg+xml");
+            const dmSvg = doc.documentElement;
+    
+            // Set width/height for scaling
+            dmSvg.setAttribute("width", dmWidth);
+            dmSvg.setAttribute("height", dmHeight);
+    
+            // Wrap it in a <g> for positioning + rotation
+            const dmGroup = document.createElementNS(svgNS, "g");
+            dmGroup.setAttribute("transform", `translate(${centerX} ${centerY}) rotate(180) scale(-1,1) translate(${-dmWidth / 2} ${-dmHeight / 2})`);
+    
+            // Import the nodes into your main SVG document
+            const imported = document.importNode(dmSvg, true);
+            dmGroup.appendChild(imported);
+            svg.appendChild(dmGroup);
+            
+        } catch (e) {
+            console.error('Error generating SVG DataMatrix:', e);
+        }
+        
+        // Add center marker for debugging
+        const centerMarker = document.createElementNS(svgNS, "circle");
+        centerMarker.setAttribute("cx", (pos.x + dmSize/2) * tileSize);
+        centerMarker.setAttribute("cy", (pos.y + dmSize/2) * tileSize);
+        centerMarker.setAttribute("r", tileSize / 8);
+        centerMarker.setAttribute("fill", "blue");
+        svg.appendChild(centerMarker);
+    });
+
+    // Add origin indicator (first DataMatrix defines origin)
+    if (dmPositions.length > 0) {
+        const origin = dmPositions[0];
+       // const originX = (origin.x + dmSize/2) * tileSize;
+       // const originY = (origin.y + dmSize/2) * tileSize;
+	   
+	    const originX = border * tileSize;
+        const originY = border * tileSize;
+		
+        // Add origin marker
+        const originMarker = document.createElementNS(svgNS, "circle");
+        originMarker.setAttribute("cx", originX);
+        originMarker.setAttribute("cy", originY);
+        originMarker.setAttribute("r", tileSize / 4);
+        originMarker.setAttribute("fill", "red");
+        svg.appendChild(originMarker);
+        
+        // Add X-axis indicator
+        const xAxis = document.createElementNS(svgNS, "line");
+        xAxis.setAttribute("x1", originX);
+        xAxis.setAttribute("y1", originY);
+        xAxis.setAttribute("x2", originX + tileSize * 2);
+        xAxis.setAttribute("y2", originY);
+        xAxis.setAttribute("stroke", "red");
+        xAxis.setAttribute("stroke-width", "0.5");
+        xAxis.setAttribute("marker-end", "url(#arrowhead)");
+        svg.appendChild(xAxis);
+        
+        // Add Y-axis indicator
+        const yAxis = document.createElementNS(svgNS, "line");
+        yAxis.setAttribute("x1", originX);
+        yAxis.setAttribute("y1", originY);
+        yAxis.setAttribute("x2", originX);
+        yAxis.setAttribute("y2", originY + tileSize * 2);
+        yAxis.setAttribute("stroke", "green");
+        yAxis.setAttribute("stroke-width", "0.5");
+        yAxis.setAttribute("marker-end", "url(#arrowhead)");
+        svg.appendChild(yAxis);
+        
+        // Add arrowhead marker definition
+        const defs = document.createElementNS(svgNS, "defs");
+        const marker = document.createElementNS(svgNS, "marker");
+        marker.setAttribute("id", "arrowhead");
+        marker.setAttribute("markerWidth", "10");
+        marker.setAttribute("markerHeight", "7");
+        marker.setAttribute("refX", "9");
+        marker.setAttribute("refY", "3.5");
+        marker.setAttribute("orient", "auto");
+        const arrow = document.createElementNS(svgNS, "polygon");
+        arrow.setAttribute("points", "0 0, 10 3.5, 0 7");
+        arrow.setAttribute("fill", "context-stroke");
+        marker.appendChild(arrow);
+        defs.appendChild(marker);
+        svg.insertBefore(defs, svg.firstChild);
+    }
+
+    // Add plate information text
+    const infoText = document.createElementNS(svgNS, "text");
+    infoText.setAttribute("x", width / 2);
+    infoText.setAttribute("y", Math.max(height - 2, height - (tileSize * 0.5)));
+    const fontSize = Math.min(5, tileSize * 0.4);
+    infoText.setAttribute("font-size", fontSize);
+    infoText.setAttribute("text-anchor", "middle");
+    infoText.setAttribute("fill", colorScheme === 'black' ? 'black' : 'white');
+    const plateText = width > 100 ? 
+        `COGNEX WH: ${(cols-border)*tileSize}x${(rows-border)*tileSize} | ${cols-border}×${rows-border} tiles | ${tileSize}mm tiles` :
+        `${cols}×${rows} | ${tileSize}mm | ${gridPitch}mm`;
+    infoText.textContent = plateText;
+    svg.appendChild(infoText);
+
+    // Update the preview
+    const preview = document.getElementById('checkerboard');
+    preview.innerHTML = '';
+    preview.appendChild(svg);
+}
+			
+			function downloadSVG() {
+				const svg = document.getElementById('checkerboard').querySelector('svg');
+				const serializer = new XMLSerializer();
+				let source = serializer.serializeToString(svg);
+				
+				// Remove debug markers and axes from the serialized string
+				source = source.replace(/<circle[^>]*fill="(blue|red)"[^>]*>|<\/circle>/g, '');
+				source = source.replace(/<line[^>]*stroke="(red|green)"[^>]*>|<\/line>/g, '');
+				source = source.replace(/<marker[^>]*>[\s\S]*?<\/marker>/g, ''); // Remove arrowhead markers
+				
+				// Add namespace if not present
+				if (!source.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
+					source = source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+				}
+				
+				// Add XML declaration
+				source = '<?xml version="1.0" standalone="no"?>\r\n' + source;
+				
+				// Convert to blob and download
+				const blob = new Blob([source], {type: 'image/svg+xml;charset=utf-8'});
+				const url = URL.createObjectURL(blob);
+				const link = document.createElement('a');
+				link.href = url;
+				link.download = 'calibration_plate.svg';
+				document.body.appendChild(link);
+				link.click();
+				document.body.removeChild(link);
+			}
+            
+          //  function downloadSVG() {
+          //      const svg = document.getElementById('checkerboard').querySelector('svg');
+          //      const serializer = new XMLSerializer();
+          //      let source = serializer.serializeToString(svg);
+          //      
+          //      // Add namespace if not present
+          //      if (!source.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
+          //          source = source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+          //      }
+          //      
+          //      // Add XML declaration
+          //      source = '<?xml version="1.0" standalone="no"?>\r\n' + source;
+          //      
+          //      // Convert to blob and download
+          //      const blob = new Blob([source], {type: 'image/svg+xml;charset=utf-8'});
+          //      const url = URL.createObjectURL(blob);
+          //      const link = document.createElement('a');
+          //      link.href = url;
+          //      link.download = 'calibration_plate.svg';
+          //      document.body.appendChild(link);
+          //      link.click();
+          //      document.body.removeChild(link);
+          //  }
+            
+            function downloadPNG() {
+                const svg = document.getElementById('checkerboard').querySelector('svg');
+                const width = parseFloat(svg.getAttribute('width').replace('mm', ''));
+                const height = parseFloat(svg.getAttribute('height').replace('mm', ''));
+                
+                // Serialize the SVG to a string
+                const serializer = new XMLSerializer();
+                let svgStr = serializer.serializeToString(svg);
+                
+                // Remove debug markers from the serialized string
+                svgStr = svgStr.replace(/<circle[^>]*fill="(blue|red)"[^>]*>|<\/circle>/g, '');
+                svgStr = svgStr.replace(/<line[^>]*stroke="(red|green)"[^>]*>|<\/line>/g, '');
+                
+                // Create an image element
+                const img = new Image();
+                const svgBlob = new Blob([svgStr], {type: 'image/svg+xml;charset=utf-8'});
+                const url = URL.createObjectURL(svgBlob);
+                
+                img.onload = function() {
+                    // Create canvas
+                    const scale = 300 / 25.4; // 300 DPI
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width * scale;
+                    canvas.height = height * scale;
+                    
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    URL.revokeObjectURL(url);
+                    
+                    // Download
+                    const link = document.createElement('a');
+                    link.download = 'calibration_plate.png';
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                };
+                
+                img.onerror = function() {
+                    console.error('Error loading SVG image');
+                    URL.revokeObjectURL(url);
+                };
+                
+                img.src = url;
+            }
+            
+            function downloadPDF() {
+                const svg = document.getElementById('checkerboard').querySelector('svg');
+                const width = parseFloat(svg.getAttribute('width').replace('mm', ''));
+                const height = parseFloat(svg.getAttribute('height').replace('mm', ''));
+                
+                // Serialize the SVG to a string
+                const serializer = new XMLSerializer();
+                let svgStr = serializer.serializeToString(svg);
+                
+                // Remove debug markers from the serialized string
+                svgStr = svgStr.replace(/<circle[^>]*fill="(blue|red)"[^>]*>|<\/circle>/g, '');
+                svgStr = svgStr.replace(/<line[^>]*stroke="(red|green)"[^>]*>|<\/line>/g, '');
+                
+                // Create an image element
+                const img = new Image();
+                const svgBlob = new Blob([svgStr], {type: 'image/svg+xml;charset=utf-8'});
+                const url = URL.createObjectURL(svgBlob);
+                
+                img.onload = function() {
+                    // Create canvas
+                    const scale = 300 / 25.4; // 300 DPI
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width * scale;
+                    canvas.height = height * scale;
+                    
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    URL.revokeObjectURL(url);
+                    
+                    // Create PDF
+                    const pdf = new jsPDF({
+                        orientation: width > height ? 'landscape' : 'portrait',
+                        unit: 'mm',
+                        format: [width, height]
+                    });
+                    
+                    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, width, height);
+                    pdf.save('calibration_plate.pdf');
+                };
+                
+                img.onerror = function() {
+                    console.error('Error loading SVG image');
+                    URL.revokeObjectURL(url);
+                };
+                
+                img.src = url;
+            }
+        });
+    </script>
+</body>
+</html>
