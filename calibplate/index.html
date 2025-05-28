@@ -728,27 +728,29 @@ function updateDMPreview() {
         const centerX = dmX + dmWidth / 2;
         const centerY = dmY + dmHeight / 2;
     
-        // White background
-        const bg = document.createElementNS(svgNS, "rect");
-        bg.setAttribute("x", pos.x * tileSize);
-        bg.setAttribute("y", pos.y * tileSize);
-        bg.setAttribute("width", dmSize * tileSize);
-        bg.setAttribute("height", dmSize * tileSize);
-        bg.setAttribute("fill", "white");
-        svg.appendChild(bg);
+        // White background DM Background
+    //    const bg = document.createElementNS(svgNS, "rect");
+    //    bg.setAttribute("x", pos.x * tileSize);
+    //    bg.setAttribute("y", pos.y * tileSize);
+    //    bg.setAttribute("width", dmSize * tileSize);
+    //    bg.setAttribute("height", dmSize * tileSize);
+    //    bg.setAttribute("fill", "white");
+    //    svg.appendChild(bg);
     
         // DataMatrix content
         const dmContent = `${pos.centerX - border}, ${pos.centerY - border} V1 P${tileSize} MM`;
     
         try {
             // Generate SVG markup from bwip-js
-            const svgMarkup = bwipjs.toSVG({
-                bcid: 'datamatrix',
-                text: dmContent,
-                scale: 3,
-                includetext: false,
-                textxalign: 'center',
-            });
+    const svgMarkup = bwipjs.toSVG({
+        bcid: 'datamatrix',
+        text: dmContent,
+        scale: 3,
+        includetext: false,
+        textxalign: 'center',
+        backgroundcolor: colorScheme === 'black' ? 'ffffff' : '000000', // Background
+        barcolor: colorScheme === 'black' ? '000000' : 'ffffff' // Foreground
+    });
     
             // Parse the SVG string into DOM elements
             const parser = new DOMParser();
