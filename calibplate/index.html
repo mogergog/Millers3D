@@ -846,7 +846,7 @@ function updateDMPreview() {
     infoText.setAttribute("text-anchor", "middle");
     infoText.setAttribute("fill", colorScheme === 'black' ? 'black' : 'white');
     const plateText = width > 100 ? 
-        `COGNEX Margin:${(border*tileSize)}mm_WH:${(cols)*tileSize}x${(rows)*tileSize}mm_Tiles:${cols}×${rows}_Pitch:${tileSize}mm_DMSize:${dmSize * tileSize * dmScale}mm_Mod:${dmSize * tileSize * dmScale/16}mm` :
+        `COGNEX Margin:${(border*tileSize)}mm_WH:${(cols)*tileSize}x${(rows)*tileSize}mm_Tiles:${cols}×${rows}_Pitch:${tileSize}mm_DMSize:${(dmSize * tileSize * dmScale).toFixed(2)}mm_Mod:${(dmSize * tileSize * dmScale/16).toFixed(2)}mm` :
         `COGNEX WH:${(cols)*tileSize}x${(rows)*tileSize}mm |T:${cols}×${rows} | TS:${tileSize}mm`;
     infoText.textContent = plateText;
     svg.appendChild(infoText);
