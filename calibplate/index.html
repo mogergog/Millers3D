@@ -320,16 +320,16 @@
             
             <div class="form-section">
                 <h3>DataMatrix Codes</h3>
+                <div class="form-group">
+                    <label for="dmCount">Number of Codes:</label>
+                    <input type="number" id="dmCount" min="1" max="500" value="4">
+                </div>
+				
 				<div class="form-group">
 					<label for="dmSize">Code Size (tiles):</label>
 					<input type="number" id="dmSize" min="2" max="100" value="4" step="2">
 					<small>Must be even number (2, 4, 6, etc.)</small>
 				</div>
-                
-                <div class="form-group">
-                    <label for="dmCount">Number of Codes:</label>
-                    <input type="number" id="dmCount" min="1" max="500" value="4">
-                </div>
                 
                 <div class="form-group">
                     <label for="dmScale">Scale (% of tile area):</label>
@@ -589,7 +589,8 @@ function updateDMPreview() {
         posDiv.className = 'dm-preview-item';
         posDiv.innerHTML = `
             <strong>DataMatrix ${dmPositions.indexOf(pos) + 1}</strong><br>
-            Position: (${pos.x - border}, ${pos.y - border}) to (${pos.x + dmSize - border}, ${pos.y + dmSize - border})<br>
+            Position (tile): (${pos.x - border}, ${pos.y - border}) to (${pos.x + dmSize - border}, ${pos.y + dmSize - border})<br>
+            Position (mm): (${(pos.x - border)*tileSize}, ${(pos.y - border)*tileSize}) to (${(pos.x + dmSize - border)*tileSize}, ${(pos.y + dmSize - border)*tileSize})<br>
             Center: (X${pos.centerX - border}, Y${pos.centerY - border})<br>
             Content: ${pos.centerX - border}, ${pos.centerY - border} V1 P${tileSize} MM
         `;
@@ -780,15 +781,15 @@ function updateDMPreview() {
     
         try {
             // Generate SVG markup from bwip-js
-    const svgMarkup = bwipjs.toSVG({
-        bcid: 'datamatrix',
-        text: dmContent,
-        scale: 3,
-        includetext: false,
-        textxalign: 'center',
-        backgroundcolor: colorScheme === 'black' ? 'ffffff' : '000000', // Background
-        barcolor: colorScheme === 'black' ? '000000' : 'ffffff' // Foreground
-    });
+			const svgMarkup = bwipjs.toSVG({
+				bcid: 'datamatrix',
+				text: dmContent,
+				scale: 3,
+				includetext: false,
+				textxalign: 'center',
+				backgroundcolor: colorScheme === 'black' ? 'ffffff' : '000000', // Background
+				barcolor: colorScheme === 'black' ? '000000' : 'ffffff' // Foreground
+			});
     
             // Parse the SVG string into DOM elements
             const parser = new DOMParser();
@@ -819,6 +820,19 @@ function updateDMPreview() {
         centerMarker.setAttribute("r", tileSize / 8);
         centerMarker.setAttribute("fill", "blue");
         svg.appendChild(centerMarker);
+		
+		// Add label for debugging
+	//	const label = document.createElementNS(svgNS, "text");
+	//	label.setAttribute("x", (pos.x + dmSize / 2) * tileSize + 1); // offset by 5 pixels to the right
+	//	label.setAttribute("y", (pos.y + dmSize / 2) * tileSize - 1); // offset by 5 pixels up
+	//	label.setAttribute("fill", "magenta");
+	//	label.setAttribute("font-size", tileSize); // adjust size as needed
+	//	label.setAttribute("font-weight", "bold");
+	//	label.setAttribute("font-family", "Arial, sans-serif"); //  
+	//	label.textContent = index+1; // your label text here
+	//	svg.appendChild(label);
+		
+		
     });
 
     // Add origin indicator (first DataMatrix defines origin)
@@ -908,6 +922,7 @@ function updateDMPreview() {
 				source = source.replace(/<circle[^>]*fill="(blue|red)"[^>]*>|<\/circle>/g, '');
 				source = source.replace(/<line[^>]*stroke="(red|green)"[^>]*>|<\/line>/g, '');
 				source = source.replace(/<marker[^>]*>[\s\S]*?<\/marker>/g, ''); // Remove arrowhead markers
+				
 				
 				// Add namespace if not present
 				if (!source.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
