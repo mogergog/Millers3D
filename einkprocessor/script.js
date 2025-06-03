@@ -20,23 +20,48 @@ let startX, startY, isDragging = false, isResizing = false, resizeDirection = ''
 let initialX, initialY;
 
 function startCropMode() {
+    if (!originalImage) {
+        alert('Please load an image first');
+        return;
+    }
+
     const aspectWidth = parseInt(aspectWidthInput.value, 10);
     const aspectHeight = parseInt(aspectHeightInput.value, 10);
 
-    // Set initial crop region size and position
-    cropRegion.style.width = `${aspectWidth}px`;
-    cropRegion.style.height = `${aspectHeight}px`;
+    // Calculate initial size based on aspect ratio but constrained to image dimensions
+    let initWidth = aspectWidth;
+    let initHeight = aspectHeight;
+    
+    // If aspect ratio is wider than image, scale down
+    if (initWidth > canvas.width) {
+        const scale = canvas.width / initWidth;
+        initWidth = canvas.width;
+        initHeight = initHeight * scale;
+    }
+    
+    // If aspect ratio is taller than image, scale down
+    if (initHeight > canvas.height) {
+        const scale = canvas.height / initHeight;
+        initHeight = canvas.height;
+        initWidth = initWidth * scale;
+    }
+
+    // Set initial crop region size
+    cropRegion.style.width = `${initWidth}px`;
+    cropRegion.style.height = `${initHeight}px`;
 
     // Center the crop region within the canvas
-    cropRegion.style.left = `${(canvas.width - aspectWidth) / 2}px`;
-    cropRegion.style.top = `${(canvas.height - aspectHeight) / 2}px`;
+    cropRegion.style.left = `${(canvas.width - initWidth) / 2}px`;
+    cropRegion.style.top = `${(canvas.height - initHeight) / 2}px`;
 
-    // Make sure crop region is visible
+    // Make crop region visible
     cropRegion.style.display = 'block';
 
     // Add event listeners
     cropRegion.addEventListener('mousedown', startMove);
-    cropRegion.querySelector('.resizer').addEventListener('mousedown', startResize);
+    document.querySelectorAll('.resizer').forEach(resizer => {
+        resizer.addEventListener('mousedown', startResize);
+    });
     document.addEventListener('mousemove', drawCropRegion);
     document.addEventListener('mouseup', stopCrop);
 }
@@ -65,57 +90,65 @@ function drawCropRegion(event) {
         let newLeft = initialX + dx;
         let newTop = initialY + dy;
         
-        // Ensure the crop region stays within canvas bounds
-        const maxX = canvas.width - parseInt(cropRegion.style.width, 10);
-        const maxY = canvas.height - parseInt(cropRegion.style.height, 10);
-        
-        newLeft = Math.max(0, Math.min(newLeft, maxX));
-        newTop = Math.max(0, Math.min(newTop, maxY));
+        // Constrain to canvas bounds
+        newLeft = Math.max(0, Math.min(newLeft, canvas.width - parseInt(cropRegion.style.width)));
+        newTop = Math.max(0, Math.min(newTop, canvas.height - parseInt(cropRegion.style.height)));
         
         cropRegion.style.left = `${newLeft}px`;
         cropRegion.style.top = `${newTop}px`;
     } else if (isResizing) {
-        const aspectWidth = parseInt(aspectWidthInput.value, 10);
-        const aspectHeight = parseInt(aspectHeightInput.value, 10);
         const rect = cropRegion.getBoundingClientRect();
+        const mouseX = event.clientX;
+        const mouseY = event.clientY;
         
-        let newWidth = event.clientX - rect.left;
-        let newHeight = event.clientY - rect.top;
+        let newWidth, newHeight;
+        const aspectRatio = parseInt(aspectWidthInput.value) / parseInt(aspectHeightInput.value);
 
-        // Calculate new dimensions maintaining aspect ratio
-        if (resizeDirection === 'se') {
-            if (newWidth / newHeight > aspectWidth / aspectHeight) {
-                newWidth = newHeight * (aspectWidth / aspectHeight);
-            } else {
-                newHeight = newWidth * (aspectHeight / aspectWidth);
-            }
-        } else if (resizeDirection === 'sw') {
-            if (newWidth / newHeight > aspectWidth / aspectHeight) {
-                newWidth = newHeight * (aspectWidth / aspectHeight);
-            } else {
-                newHeight = newWidth * (aspectHeight / aspectWidth);
-            }
-            cropRegion.style.left = `${rect.left - (newWidth - rect.width)}px`;
-        } else if (resizeDirection === 'ne') {
-            if (newWidth / newHeight > aspectWidth / aspectHeight) {
-                newHeight = newWidth * (aspectHeight / aspectWidth);
-            } else {
-                newWidth = newHeight * (aspectWidth / aspectHeight);
-            }
-        } else if (resizeDirection === 'nw') {
-            if (newWidth / newHeight > aspectWidth / aspectHeight) {
-                newHeight = newWidth * (aspectHeight / aspectWidth);
-            } else {
-                newWidth = newHeight * (aspectWidth / aspectHeight);
-            }
-            cropRegion.style.left = `${rect.left - (newWidth - rect.width)}px`;
-            cropRegion.style.top = `${rect.top - (newHeight - rect.height)}px`;
+        // Calculate new dimensions based on resize direction
+        switch(resizeDirection) {
+            case 'se':
+                newWidth = mouseX - rect.left;
+                newHeight = newWidth / aspectRatio;
+                break;
+            case 'sw':
+                newWidth = rect.right - mouseX;
+                newHeight = newWidth / aspectRatio;
+                cropRegion.style.left = `${rect.left + (rect.width - newWidth)}px`;
+                break;
+            case 'ne':
+                newHeight = rect.bottom - mouseY;
+                newWidth = newHeight * aspectRatio;
+                cropRegion.style.top = `${rect.top + (rect.height - newHeight)}px`;
+                break;
+            case 'nw':
+                newWidth = rect.right - mouseX;
+                newHeight = newWidth / aspectRatio;
+                cropRegion.style.left = `${rect.left + (rect.width - newWidth)}px`;
+                cropRegion.style.top = `${rect.top + (rect.height - newHeight)}px`;
+                break;
         }
-        
-        // Ensure the crop region stays within canvas bounds and does not exceed the canvas size
-        newWidth = Math.min(Math.max(aspectWidth/100, newWidth), canvas.width - parseInt(cropRegion.style.left, 10));
-        newHeight = Math.min(Math.max(aspectHeight/100, newHeight), canvas.height - parseInt(cropRegion.style.top, 10));
-        
+
+        // Constrain dimensions to canvas and minimum size
+        newWidth = Math.max(10, Math.min(newWidth, canvas.width - parseInt(cropRegion.style.left)));
+        newHeight = Math.max(10, Math.min(newHeight, canvas.height - parseInt(cropRegion.style.top)));
+
+        // Maintain aspect ratio
+        if (newWidth / newHeight > aspectRatio) {
+            newHeight = newWidth / aspectRatio;
+        } else {
+            newWidth = newHeight * aspectRatio;
+        }
+
+        // Adjust position if resizing from left or top
+        if (resizeDirection === 'sw' || resizeDirection === 'nw') {
+            const widthChange = parseInt(cropRegion.style.width) - newWidth;
+            cropRegion.style.left = `${parseInt(cropRegion.style.left) + widthChange}px`;
+        }
+        if (resizeDirection === 'ne' || resizeDirection === 'nw') {
+            const heightChange = parseInt(cropRegion.style.height) - newHeight;
+            cropRegion.style.top = `${parseInt(cropRegion.style.top) + heightChange}px`;
+        }
+
         cropRegion.style.width = `${newWidth}px`;
         cropRegion.style.height = `${newHeight}px`;
     }

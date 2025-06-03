@@ -3,108 +3,215 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image Processing</title>
+    <title>Image Processing Tool</title>
     <style>
+        :root {
+            --primary-color: #007bff;
+            --success-color: #02a600;
+            --warning-color: #ff9800;
+            --danger-color: #f44336;
+            --dark-color: #343a40;
+            --light-color: #f8f9fa;
+        }
+        
         body {
-            font-family: Arial, sans-serif;
-            text-align: left;
-            margin: 0px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
         }
-		button {
-			background-color: #007bff; /* Blue background */
-			border: none; /* Remove default border */
-			color: white; /* White text */
-			padding: 10px 20px; /* Padding inside the button */
-			text-align: center; /* Center text */
-			text-decoration: none; /* Remove underline */
-			display: inline-block; /* Align buttons next to each other */
-			font-size: 16px; /* Font size */
-			margin: 5px; /* Margin around buttons */
-			cursor: pointer; /* Pointer cursor on hover */
-			border-radius: 5px; /* Rounded corners */
-			transition: background-color 0.3s ease, transform 0.2s ease; /* Smooth transitions */
-		}
+        
+        h1 {
+            color: var(--dark-color);
+            margin-bottom: 0.5rem;
+        }
+        
+        h4 {
+            color: #666;
+            margin-top: 0;
+            font-weight: normal;
+        }
+        
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+        
+        .canvas-container {
+            position: relative;
+            margin: 20px 0;
+            border: 1px solid #ddd;
+            display: inline-block;
+            background-color: #eee;
+        }
+        
         canvas {
-            border: 0px solid black;
-            position: relative; /* Ensure the canvas is the relative reference for absolute positioning */
+            display: block;
+            max-width: 100%;
         }
+        
         #cropRegion {
             position: absolute;
             border: 2px dashed cyan;
             cursor: move;
-            display: none; /* Initially hidden */
+            display: none;
         }
+        
         .resizer {
             position: absolute;
             width: 10px;
             height: 10px;
-            background: #1E90FF;
+            background: var(--primary-color);
         }
+        
         .resizer.se { cursor: se-resize; right: 0; bottom: 0; }
-       // .resizer.sw { cursor: sw-resize; left: 0; bottom: 0; }
-       // .resizer.ne { cursor: ne-resize; right: 0; top: 0; }
-       // .resizer.nw { cursor: nw-resize; left: 0; top: 0; }
+        .resizer.sw { cursor: sw-resize; left: 0; bottom: 0; }
+        .resizer.ne { cursor: ne-resize; right: 0; top: 0; }
+        .resizer.nw { cursor: nw-resize; left: 0; top: 0; }
+        
+        .control-group {
+            margin: 15px 0;
+            padding: 15px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .control-group:last-child {
+            border-bottom: none;
+        }
+        
+        label {
+            display: inline-block;
+            margin-right: 10px;
+            font-weight: 500;
+        }
+        
+        input[type="number"], 
+        input[type="range"] {
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        input[type="range"] {
+            width: 200px;
+        }
+        
+        button {
+            background-color: var(--primary-color);
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 14px;
+            margin: 5px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.3s ease;
+        }
+        
+        button:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        
+        #grayscaleButton, #binarizeButton {
+            background-color: var(--dark-color);
+        }
+        
+        #confirmCropButton {
+            background-color: var(--warning-color);
+        }
+        
+        #resetCropButton {
+            background-color: var(--danger-color);
+        }
+        
+        #saveButton {
+            background-color: var(--success-color);
+        }
+        
+        .radio-group {
+            display: inline-block;
+            margin-right: 20px;
+        }
+        
+        .radio-group label {
+            margin-right: 15px;
+            font-weight: normal;
+        }
     </style>
 </head>
 <body>
+    <div class="container">
+        <h1>Image Processing for LCD, E-Ink, and Laser</h1>
+        <h4>Your image is processed locally on your machine and not uploaded anywhere.</h4>
+        
+        <div class="control-group">
+            <input type="file" id="imageInput" accept="image/*">
+        </div>
+        
+        <div class="canvas-container">
+            <canvas id="canvas"></canvas>
+            <div id="cropRegion">
+                <div class="resizer se" data-resize="se"></div>
+                <div class="resizer sw" data-resize="sw"></div>
+                <div class="resizer ne" data-resize="ne"></div>
+                <div class="resizer nw" data-resize="nw"></div>
+            </div>
+        </div>
+        
+        <div class="control-group">
+            <label for="aspectWidth">Aspect Ratio:</label>
+            <input type="number" id="aspectWidth" value="800" min="1">
+            <span>x</span>
+            <input type="number" id="aspectHeight" value="480" min="1">
+        </div>
+        
+        <div class="control-group">
+            <button id="startCropButton">Start Cropping</button>
+            <button id="confirmCropButton">Confirm Crop</button>
+            <button id="resetCropButton">Clear Crop</button>
+        </div>
+        
+        <div class="control-group">
+            <label for="brightnessSlider">Brightness:</label>
+            <input type="range" id="brightnessSlider" min="-100" max="100" value="0">
+        </div>
+        
+        <div class="control-group">
+            <label for="contrastSlider">Contrast:</label>
+            <input type="range" id="contrastSlider" min="-100" max="100" value="0">
+        </div>
+        
+        <div class="control-group">
+            <button id="grayscaleButton">Convert to Grayscale</button>
+            <button id="binarizeButton">Sierra Binarization</button>
+            <button id="saveButton">Save Image</button>
+        </div>
+        
+        <div class="control-group">
+            <div class="radio-group">
+                <label>
+                    <input type="radio" name="scanDirection" value="horizontal" checked>
+                    Horizontal
+                </label>
+                <label>
+                    <input type="radio" name="scanDirection" value="vertical">
+                    Vertical
+                </label>
+            </div>
+            <button id="saveAsTxtButton">Save as Hex Array (8bit)</button>
+        </div>
+    </div>
 
-
-	<canvas id="canvas"></canvas>
-	<div id="cropRegion">
-        <div class="resizer se" data-resize="se"></div>
-        <div class="resizer sw" data-resize="sw"></div>
-        <div class="resizer ne" data-resize="ne"></div>
-        <div class="resizer nw" data-resize="nw"></div>
-		</div>
-	
-
-    <h1>Image Processing for LCD, E-Ink, and Laser</h1>
-	 <h4>Your image is not uploaded anywhere, it will be processed locally on your machine.</h4>
-	
-	 <input type="file" id="imageInput" accept="image/*">
-	  <br><br>
-	 <br><br>
-	 
-	<label for="aspectWidth">Aspect Ratio Width:</label>
-    <input type="number" id="aspectWidth" value="800">
-    <label for="aspectHeight">Aspect Ratio Height:</label>
-    <input type="number" id="aspectHeight" value="480">
-    <br><br>
-	<button id="startCropButton">Start Cropping</button>
-    <button id="confirmCropButton" style="background-color:orange">Confirm Crop</button>
-    <button id="resetCropButton" style="background-color:red">Clear Crop</button>
-	
-   
-    
-    <br><br>
-    <label for="brightnessSlider">Adjust Brightness:</label>
-    <input type="range" id="brightnessSlider" min="-100" max="100" value="0">
-    <br><br>
-    <label for="contrastSlider">Adjust Contrast:</label>
-    <input type="range" id="contrastSlider" min="-100" max="100" value="0">
-    <br><br>
-    
-
-    
-
-	
-    <br>
-    
-    
-    <button id="grayscaleButton" style="background-color:black">Convert to Grayscale</button>
-    <button id="binarizeButton" style="background-color:black">Sierra Binarization</button>
-    <button id="saveButton" style="background-color:#02a600">Save Image</button>
-	<br><br>
-    
-    <label>
-        <input type="radio" name="scanDirection" value="horizontal" checked>
-        Horizontal
-    </label>
-    <label>
-        <input type="radio" name="scanDirection" value="vertical">
-        Vertical
-    </label>
-    <button id="saveAsTxtButton">Save as Hex Array (8bit)</button>
     <script src="script.js"></script>
 </body>
 </html>
