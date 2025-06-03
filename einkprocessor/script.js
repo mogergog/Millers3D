@@ -8,7 +8,10 @@ document.getElementById('startCropButton').addEventListener('click', startCropMo
 document.getElementById('confirmCropButton').addEventListener('click', cropImage);
 document.getElementById('resetCropButton').addEventListener('click', resetCrop);
 
+
+
 let canvas = document.getElementById('canvas');
+//canvas.style.outline = "2px solid red";
 let ctx = canvas.getContext('2d');
 let originalImage = null;
 let originalFilename = '';
@@ -42,24 +45,25 @@ function startCropMode() {
     const aspectHeight = parseInt(aspectHeightInput.value, 10);
     const aspectRatio = aspectWidth / aspectHeight;
 
-    const canvasDisplayWidth = canvas.offsetWidth;
-    const canvasDisplayHeight = canvas.offsetHeight;
+    const displayWidth = canvasDisplaySize.width;
+    const displayHeight = canvasDisplaySize.height;
 
-    let initWidth = Math.min(canvasDisplayWidth, canvasDisplayWidth);
-    let initHeight = initWidth / aspectRatio;
+    let cropDisplayWidth = displayWidth * 0.5; // Use 50% of canvas width
+    let cropDisplayHeight = cropDisplayWidth / aspectRatio;
 
-    if (initHeight > canvasDisplayHeight) {
-        initHeight = canvasDisplayHeight;
-        initWidth = initHeight * aspectRatio;
+    if (cropDisplayHeight > displayHeight) {
+        cropDisplayHeight = displayHeight * 0.5;
+        cropDisplayWidth = cropDisplayHeight * aspectRatio;
     }
 
-    const centerX = (canvasDisplayWidth - initWidth) / 2;
-    const centerY = (canvasDisplayHeight - initHeight) / 2;
+	const cropLeft = canvasPosition.left + (displayWidth - cropDisplayWidth) / 2;
+	const cropTop = canvasPosition.top + (displayHeight - cropDisplayHeight) / 2;
 
-    cropRegion.style.width = `${initWidth}px`;
-    cropRegion.style.height = `${initHeight}px`;
-    cropRegion.style.left = `${canvas.offsetLeft + centerX}px`;
-    cropRegion.style.top = `${canvas.offsetTop + centerY}px`;
+    cropRegion.style.width = `${cropDisplayWidth}px`;
+    cropRegion.style.height = `${cropDisplayHeight}px`;
+    
+	cropRegion.style.left = `${cropLeft}px`;
+	cropRegion.style.top = `${cropTop}px`;
     cropRegion.style.display = 'block';
 
     cropRegion.addEventListener('mousedown', startMove);
@@ -330,16 +334,16 @@ function loadImage(event) {
 }
 
 function updateCanvasPosition() {
-    const rect = canvas.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
     const containerRect = canvas.parentElement.getBoundingClientRect();
-    
+
     canvasPosition = {
-        left: canvas.offsetLeft,
-        top: canvas.offsetTop
+        left: canvasRect.left - containerRect.left,
+        top: canvasRect.top - containerRect.top
     };
     canvasDisplaySize = {
-        width: canvas.offsetWidth,
-        height: canvas.offsetHeight
+        width: canvasRect.width,
+        height: canvasRect.height
     };
 }
 
