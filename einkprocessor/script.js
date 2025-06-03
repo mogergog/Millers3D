@@ -19,61 +19,68 @@ const aspectHeightInput = document.getElementById('aspectHeight');
 let startX, startY, isDragging = false, isResizing = false, resizeDirection = '';
 let initialX, initialY;
 
+let canvasOffsetX = 0;
+let canvasOffsetY = 0;
+let canvasScale = 1;
+let canvasRect = null;
+let canvasScaleX = 1;
+let canvasScaleY = 1;
+
+// Add these at the top of your script
+let canvasPosition = { left: 0, top: 0 };
+let canvasDisplaySize = { width: 0, height: 0 };
+
 function startCropMode() {
     if (!originalImage) {
         alert('Please load an image first');
         return;
     }
 
+    updateCanvasPosition();
+
     const aspectWidth = parseInt(aspectWidthInput.value, 10);
     const aspectHeight = parseInt(aspectHeightInput.value, 10);
+    const aspectRatio = aspectWidth / aspectHeight;
 
-    // Calculate initial size based on aspect ratio but constrained to image dimensions
-    let initWidth = aspectWidth;
-    let initHeight = aspectHeight;
-    
-    // If aspect ratio is wider than image, scale down
-    if (initWidth > canvas.width) {
-        const scale = canvas.width / initWidth;
-        initWidth = canvas.width;
-        initHeight = initHeight * scale;
-    }
-    
-    // If aspect ratio is taller than image, scale down
-    if (initHeight > canvas.height) {
-        const scale = canvas.height / initHeight;
-        initHeight = canvas.height;
-        initWidth = initWidth * scale;
+    const canvasDisplayWidth = canvas.offsetWidth;
+    const canvasDisplayHeight = canvas.offsetHeight;
+
+    let initWidth = Math.min(canvasDisplayWidth, canvasDisplayWidth);
+    let initHeight = initWidth / aspectRatio;
+
+    if (initHeight > canvasDisplayHeight) {
+        initHeight = canvasDisplayHeight;
+        initWidth = initHeight * aspectRatio;
     }
 
-    // Set initial crop region size
+    const centerX = (canvasDisplayWidth - initWidth) / 2;
+    const centerY = (canvasDisplayHeight - initHeight) / 2;
+
     cropRegion.style.width = `${initWidth}px`;
     cropRegion.style.height = `${initHeight}px`;
-
-    // Center the crop region within the canvas
-    cropRegion.style.left = `${(canvas.width - initWidth) / 2}px`;
-    cropRegion.style.top = `${(canvas.height - initHeight) / 2}px`;
-
-    // Make crop region visible
+    cropRegion.style.left = `${canvas.offsetLeft + centerX}px`;
+    cropRegion.style.top = `${canvas.offsetTop + centerY}px`;
     cropRegion.style.display = 'block';
 
-    // Add event listeners
     cropRegion.addEventListener('mousedown', startMove);
     document.querySelectorAll('.resizer').forEach(resizer => {
         resizer.addEventListener('mousedown', startResize);
     });
     document.addEventListener('mousemove', drawCropRegion);
     document.addEventListener('mouseup', stopCrop);
+    document.addEventListener('scroll', updateCanvasPosition);
+    window.addEventListener('resize', updateCanvasPosition);
 }
 
 function startMove(event) {
-    if (event.target === cropRegion.querySelector('.resizer')) return; // Ignore if resizing
+    if (event.target.classList.contains('resizer')) return;
+    
     startX = event.clientX;
     startY = event.clientY;
     initialX = parseInt(cropRegion.style.left, 10);
     initialY = parseInt(cropRegion.style.top, 10);
     isDragging = true;
-    event.stopPropagation();
+    event.preventDefault();
 }
 
 function startResize(event) {
@@ -84,15 +91,18 @@ function startResize(event) {
 
 function drawCropRegion(event) {
     if (isDragging) {
-        let dx = event.clientX - startX;
-        let dy = event.clientY - startY;
+        const dx = event.clientX - startX;
+        const dy = event.clientY - startY;
         
         let newLeft = initialX + dx;
         let newTop = initialY + dy;
         
         // Constrain to canvas bounds
-        newLeft = Math.max(0, Math.min(newLeft, canvas.width - parseInt(cropRegion.style.width)));
-        newTop = Math.max(0, Math.min(newTop, canvas.height - parseInt(cropRegion.style.height)));
+        const maxLeft = canvasPosition.left + canvasDisplaySize.width - parseInt(cropRegion.style.width);
+        const maxTop = canvasPosition.top + canvasDisplaySize.height - parseInt(cropRegion.style.height);
+        
+        newLeft = Math.max(canvasPosition.left, Math.min(newLeft, maxLeft));
+        newTop = Math.max(canvasPosition.top, Math.min(newTop, maxTop));
         
         cropRegion.style.left = `${newLeft}px`;
         cropRegion.style.top = `${newTop}px`;
@@ -101,10 +111,9 @@ function drawCropRegion(event) {
         const mouseX = event.clientX;
         const mouseY = event.clientY;
         
-        let newWidth, newHeight;
         const aspectRatio = parseInt(aspectWidthInput.value) / parseInt(aspectHeightInput.value);
+        let newWidth, newHeight;
 
-        // Calculate new dimensions based on resize direction
         switch(resizeDirection) {
             case 'se':
                 newWidth = mouseX - rect.left;
@@ -128,25 +137,18 @@ function drawCropRegion(event) {
                 break;
         }
 
-        // Constrain dimensions to canvas and minimum size
-        newWidth = Math.max(10, Math.min(newWidth, canvas.width - parseInt(cropRegion.style.left)));
-        newHeight = Math.max(10, Math.min(newHeight, canvas.height - parseInt(cropRegion.style.top)));
+        // Constrain dimensions
+        const maxWidth = (canvasPosition.left + canvasDisplaySize.width) - parseInt(cropRegion.style.left);
+        const maxHeight = (canvasPosition.top + canvasDisplaySize.height) - parseInt(cropRegion.style.top);
+        
+        newWidth = Math.max(10, Math.min(newWidth, maxWidth));
+        newHeight = Math.max(10, Math.min(newHeight, maxHeight));
 
         // Maintain aspect ratio
         if (newWidth / newHeight > aspectRatio) {
             newHeight = newWidth / aspectRatio;
         } else {
             newWidth = newHeight * aspectRatio;
-        }
-
-        // Adjust position if resizing from left or top
-        if (resizeDirection === 'sw' || resizeDirection === 'nw') {
-            const widthChange = parseInt(cropRegion.style.width) - newWidth;
-            cropRegion.style.left = `${parseInt(cropRegion.style.left) + widthChange}px`;
-        }
-        if (resizeDirection === 'ne' || resizeDirection === 'nw') {
-            const heightChange = parseInt(cropRegion.style.height) - newHeight;
-            cropRegion.style.top = `${parseInt(cropRegion.style.top) + heightChange}px`;
         }
 
         cropRegion.style.width = `${newWidth}px`;
@@ -160,55 +162,66 @@ function stopCrop() {
 }
 
 function cropImage() {
+    updateCanvasPosition(); // Refresh canvas position
+    
+    // Calculate scale factors
+    const scaleX = canvasDisplaySize.width / canvas.width;
+    const scaleY = canvasDisplaySize.height / canvas.height;
+
+    // Convert screen coordinates to image coordinates
+    const cropLeft = (parseInt(cropRegion.style.left) - canvasPosition.left) / scaleX;
+    const cropTop = (parseInt(cropRegion.style.top) - canvasPosition.top) / scaleY;
+    const cropWidth = parseInt(cropRegion.style.width) / scaleX;
+    const cropHeight = parseInt(cropRegion.style.height) / scaleY;
+
     const aspectWidth = parseInt(aspectWidthInput.value, 10);
     const aspectHeight = parseInt(aspectHeightInput.value, 10);
-    const cropX = parseInt(cropRegion.style.left, 10);
-    const cropY = parseInt(cropRegion.style.top, 10);
-    const cropWidth = parseInt(cropRegion.style.width, 10);
-    const cropHeight = parseInt(cropRegion.style.height, 10);
 
-    // Get the cropped image data
-    const croppedImageData = ctx.getImageData(cropX, cropY, cropWidth, cropHeight);
+    // Get the cropped image data with boundary checks
+    const safeLeft = Math.max(0, Math.min(cropLeft, canvas.width - 1));
+    const safeTop = Math.max(0, Math.min(cropTop, canvas.height - 1));
+    const safeWidth = Math.min(cropWidth, canvas.width - safeLeft);
+    const safeHeight = Math.min(cropHeight, canvas.height - safeTop);
 
-    // Create a temporary canvas to handle scaling
-    const tempCanvas = document.createElement('canvas');
-    const tempCtx = tempCanvas.getContext('2d');
+    const croppedImageData = ctx.getImageData(safeLeft, safeTop, safeWidth, safeHeight);
 
-    // Set temporary canvas size to the aspect ratio
-    tempCanvas.width = cropWidth;
-    tempCanvas.height = cropHeight;
-
-    // Draw the cropped image data onto the temporary canvas
-    tempCtx.putImageData(croppedImageData, 0, 0);
-
-    // Create a new canvas to draw the final image with the aspect ratio
+    // Create final canvas
     const finalCanvas = document.createElement('canvas');
     const finalCtx = finalCanvas.getContext('2d');
     finalCanvas.width = aspectWidth;
     finalCanvas.height = aspectHeight;
 
-    // Calculate scaling factors
-    const scaleX = aspectWidth / cropWidth;
-    const scaleY = aspectHeight / cropHeight;
-    const scale = Math.min(scaleX, scaleY);
+    // Calculate scaling
+    const scale = Math.min(
+        aspectWidth / croppedImageData.width,
+        aspectHeight / croppedImageData.height
+    );
 
-    // Calculate the offset for centering
-    const offsetX = (aspectWidth - cropWidth * scale) / 2;
-    const offsetY = (aspectHeight - cropHeight * scale) / 2;
+    // Calculate offset for centering
+    const offsetX = (aspectWidth - croppedImageData.width * scale) / 2;
+    const offsetY = (aspectHeight - croppedImageData.height * scale) / 2;
 
-    // Scale the image and draw it on the final canvas
-    finalCtx.drawImage(tempCanvas, 0, 0, cropWidth, cropHeight, offsetX, offsetY, cropWidth * scale, cropHeight * scale);
+    // Draw scaled image
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = croppedImageData.width;
+    tempCanvas.height = croppedImageData.height;
+    tempCanvas.getContext('2d').putImageData(croppedImageData, 0, 0);
+    
+    finalCtx.drawImage(tempCanvas, 0, 0, croppedImageData.width, croppedImageData.height,
+                      offsetX, offsetY, croppedImageData.width * scale, croppedImageData.height * scale);
 
-    // Clear the main canvas and draw the scaled image
+    // Update main canvas
     canvas.width = aspectWidth;
     canvas.height = aspectHeight;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    canvas.style.width = `${aspectWidth}px`;
+    canvas.style.height = `${aspectHeight}px`;
     ctx.drawImage(finalCanvas, 0, 0);
-	
-	// Update the originalImage to the cropped and scaled image
     originalImage = ctx.getImageData(0, 0, canvas.width, canvas.height);
-	
-	
+    
+    // Reset
+    resetCrop();
+    document.removeEventListener('scroll', updateCanvasPosition);
+    window.removeEventListener('resize', updateCanvasPosition);
 }
 
 function resetCrop() {
@@ -281,20 +294,53 @@ document.getElementById('saveAsTxtButton').addEventListener('click', function() 
     link.click();
 });
 
+// Update the loadImage function to calculate canvas position
 function loadImage(event) {
     const file = event.target.files[0];
+    originalFilename = file.name.replace(/\.[^/.]+$/, "");
     const reader = new FileReader();
     reader.onload = function(e) {
         const img = new Image();
         img.onload = function() {
+            // Set canvas to original image dimensions
             canvas.width = img.width;
             canvas.height = img.height;
+            
+            // Calculate display size (maintain aspect ratio)
+            const maxDisplayWidth = window.innerWidth * 0.8;
+            const maxDisplayHeight = window.innerHeight * 0.6;
+            const scale = Math.min(
+                maxDisplayWidth / img.width,
+                maxDisplayHeight / img.height,
+                1
+            );
+            
+            canvas.style.width = `${img.width * scale}px`;
+            canvas.style.height = `${img.height * scale}px`;
+            
+            // Store canvas position and display size
+            updateCanvasPosition();
+            
             ctx.drawImage(img, 0, 0);
             originalImage = ctx.getImageData(0, 0, canvas.width, canvas.height);
         }
         img.src = e.target.result;
     }
     reader.readAsDataURL(file);
+}
+
+function updateCanvasPosition() {
+    const rect = canvas.getBoundingClientRect();
+    const containerRect = canvas.parentElement.getBoundingClientRect();
+    
+    canvasPosition = {
+        left: canvas.offsetLeft,
+        top: canvas.offsetTop
+    };
+    canvasDisplaySize = {
+        width: canvas.offsetWidth,
+        height: canvas.offsetHeight
+    };
 }
 
 function saveImage() {
