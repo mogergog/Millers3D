@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Matrix Module Calculator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            background-color: #f8f8f8;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .controls {
+            flex: 1;
+            min-width: 300px;
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border: 1px solid #e0e0e0;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            font-size: 14px;
+            color: #333;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        .input-group input {
+            flex: 1;
+        }
+        .form-section {
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+        .form-section h3 {
+            margin-top: 0;
+            color: #333;
+            font-size: 16px;
+            border-bottom: 2px solid #FFE600;
+            padding-bottom: 5px;
+            display: inline-block;
+        }
+        small {
+            font-size: 12px;
+            color: #666;
+        }
+        button {
+            background-color: #333;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+            transition: all 0.2s;
+            font-weight: 600;
+        }
+        button:hover {
+            background-color: #555;
+        }
+        .results {
+            margin-top: 20px;
+            padding: 15px;
+            background: #FFF9CC;
+            border-radius: 4px;
+            border-left: 4px solid #FFE600;
+        }
+        .result-value {
+            font-weight: bold;
+            color: #000000;
+        }
+    </style>
+</head>
+<body>
+    <h1>Data Matrix Module Calculator</h1>
+    
+    <div class="container">
+        <div class="controls">
+            <div class="form-section">
+                <h3>Camera Parameters</h3>
+                <div class="form-group">
+                    <label for="resolutionX">Camera Resolution (X, Y) in pixels:</label>
+                    <div class="input-group">
+                        <input type="number" id="resolutionX" placeholder="X resolution" value="1440">
+                        <input type="number" id="resolutionY" placeholder="Y resolution" value="1080">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="form-section">
+                <h3>Field of View</h3>
+                <div class="form-group">
+                    <label for="nearFovX">Near Field of View (X, Y) in mm:</label>
+                    <div class="input-group">
+                        <input type="number" id="nearFovX" placeholder="X size" value="308.9">
+                        <input type="number" id="nearFovY" placeholder="Y size" value="230.8">
+                    </div>
+                    <small>Measured at near distance</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="farFovX">Far Field of View (X, Y) in mm:</label>
+                    <div class="input-group">
+                        <input type="number" id="farFovX" placeholder="X size" value="622.9">
+                        <input type="number" id="farFovY" placeholder="Y size" value="465.4">
+                    </div>
+                    <small>Measured at far distance</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="nearDistance">Near Distance (mm):</label>
+                    <input type="number" id="nearDistance" placeholder="Near distance" value="1000">
+                </div>
+                
+                <div class="form-group">
+                    <label for="farDistance">Far Distance (mm):</label>
+                    <input type="number" id="farDistance" placeholder="Far distance" value="2000">
+                </div>
+            </div>
+            
+            <div class="form-section">
+                <h3>Data Matrix Parameters</h3>
+                <div class="form-group">
+                    <label for="dmSizeX">Data Matrix Size (X, Y) in mm:</label>
+                    <div class="input-group">
+                        <input type="number" id="dmSizeX" placeholder="X size" value="20">
+                        <input type="number" id="dmSizeY" placeholder="Y size" value="20">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label for="dmModuleCountX">Module Count (X, Y):</label>
+                    <div class="input-group">
+                        <input type="number" id="dmModuleCountX" placeholder="X modules" value="20">
+                        <input type="number" id="dmModuleCountY" placeholder="Y modules" value="20">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="form-section">
+                <h3>Measurement</h3>
+                <div class="form-group">
+                    <label for="distance">Camera - Data Matrix Distance (mm):</label>
+                    <input type="number" id="distance" placeholder="Distance in mm" value="1500">
+                </div>
+            </div>
+            
+            <div class="results" id="results" style="display: none;">
+                <h3>Calculation Results</h3>
+                <p>Field of View at this distance: <span class="result-value" id="fovSize"></span> mm</p>
+                <p>Pixels per mm: <span class="result-value" id="pixelsPerMm"></span></p>
+                <p>Module size: <span class="result-value" id="moduleSize"></span> mm</p>
+                <p>Pixel per module (X): <span class="result-value" id="pixelPerModuleX"></span> pixels</p>
+                <p>Pixel per module (Y): <span class="result-value" id="pixelPerModuleY"></span> pixels</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Add event listeners to all inputs to recalculate when values change
+            const inputs = document.querySelectorAll('input');
+            inputs.forEach(input => {
+                input.addEventListener('change', calculatePixelPerModule);
+            });
+            
+            // Initial calculation
+            calculatePixelPerModule();
+        });
+        
+        function calculatePixelPerModule() {
+            // Get input values
+            const resolutionX = parseFloat(document.getElementById('resolutionX').value);
+            const resolutionY = parseFloat(document.getElementById('resolutionY').value);
+            const nearFovX = parseFloat(document.getElementById('nearFovX').value);
+            const nearFovY = parseFloat(document.getElementById('nearFovY').value);
+            const farFovX = parseFloat(document.getElementById('farFovX').value);
+            const farFovY = parseFloat(document.getElementById('farFovY').value);
+            const nearDistance = parseFloat(document.getElementById('nearDistance').value);
+            const farDistance = parseFloat(document.getElementById('farDistance').value);
+            const dmSizeX = parseFloat(document.getElementById('dmSizeX').value);
+            const dmSizeY = parseFloat(document.getElementById('dmSizeY').value);
+            const dmModuleCountX = parseFloat(document.getElementById('dmModuleCountX').value);
+            const dmModuleCountY = parseFloat(document.getElementById('dmModuleCountY').value);
+            const distance = parseFloat(document.getElementById('distance').value);
+            
+            // Calculate angular field of view (constant for a given lens)
+            const angularFovX = 2 * Math.atan(nearFovX / (2 * nearDistance));
+            const angularFovY = 2 * Math.atan(nearFovY / (2 * nearDistance));
+            
+            // Calculate FOV at current distance
+            const fovX = 2 * distance * Math.tan(angularFovX / 2);
+            const fovY = 2 * distance * Math.tan(angularFovY / 2);
+            
+            document.getElementById('fovSize').textContent = `${fovX.toFixed(1)} × ${fovY.toFixed(1)}`;
+            
+            // Calculate pixels per mm
+            const pixelsPerMmX = resolutionX / fovX;
+            const pixelsPerMmY = resolutionY / fovY;
+            document.getElementById('pixelsPerMm').textContent = `${pixelsPerMmX.toFixed(2)} (X) × ${pixelsPerMmY.toFixed(2)} (Y)`;
+            
+            // Calculate module size in mm
+            const moduleSizeX = dmSizeX / dmModuleCountX;
+            const moduleSizeY = dmSizeY / dmModuleCountY;
+            document.getElementById('moduleSize').textContent = `${moduleSizeX.toFixed(3)} (X) × ${moduleSizeY.toFixed(3)} (Y)`;
+            
+            // Calculate pixel per module
+            const pixelPerModuleX = moduleSizeX * pixelsPerMmX;
+            const pixelPerModuleY = moduleSizeY * pixelsPerMmY;
+            document.getElementById('pixelPerModuleX').textContent = pixelPerModuleX.toFixed(2);
+            document.getElementById('pixelPerModuleY').textContent = pixelPerModuleY.toFixed(2);
+            
+            // Show results
+            document.getElementById('results').style.display = 'block';
+        }
+    </script>
+</body>
+</html>
