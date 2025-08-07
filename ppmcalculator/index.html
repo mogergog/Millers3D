@@ -119,7 +119,7 @@
             <div class="form-section">
                 <h3>Field of View</h3>
                 <div class="form-group">
-                    <label for="nearFovX">Near Field of View (X, Y) in mm:</label>
+                    <label for="nearFovX">Near Field of View (X, Y) in mm (set it to 0 if unknown):</label>
                     <div class="input-group">
                         <input type="number" id="nearFovX" placeholder="X size" value="308.9">
                         <input type="number" id="nearFovY" placeholder="Y size" value="230.8">
@@ -137,12 +137,12 @@
                 </div>
                 
                 <div class="form-group">
-                    <label for="nearDistance">Near Distance (mm):</label>
+                    <label for="nearDistance">Near Distance in mm (set it to 0 if unknown):</label>
                     <input type="number" id="nearDistance" placeholder="Near distance" value="1000">
                 </div>
                 
                 <div class="form-group">
-                    <label for="farDistance">Far Distance (mm):</label>
+                    <label for="farDistance">Far Distance in mm:</label>
                     <input type="number" id="farDistance" placeholder="Far distance" value="2000">
                 </div>
             </div>
@@ -169,7 +169,7 @@
             <div class="form-section">
                 <h3>Measurement</h3>
                 <div class="form-group">
-                    <label for="distance">Camera - Data Matrix Distance (mm):</label>
+                    <label for="distance">Camera - Data Matrix Distance in mm:</label>
                     <input type="number" id="distance" placeholder="Distance in mm" value="1500">
                 </div>
             </div>
@@ -244,5 +244,6 @@
     </script>
 </body>
 </html>
+
 
 
