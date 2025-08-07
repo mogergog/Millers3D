@@ -185,63 +185,62 @@
         </div>
     </div>
 
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            // Add event listeners to all inputs to recalculate when values change
-            const inputs = document.querySelectorAll('input');
-            inputs.forEach(input => {
-                input.addEventListener('change', calculatePixelPerModule);
-            });
-            
-            // Initial calculation
-            calculatePixelPerModule();
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Add event listeners to all inputs to recalculate when values change
+        const inputs = document.querySelectorAll('input');
+        inputs.forEach(input => {
+            input.addEventListener('change', calculatePixelPerModule);
         });
         
-        function calculatePixelPerModule() {
-            // Get input values
-            const resolutionX = parseFloat(document.getElementById('resolutionX').value);
-            const resolutionY = parseFloat(document.getElementById('resolutionY').value);
-            const nearFovX = parseFloat(document.getElementById('nearFovX').value);
-            const nearFovY = parseFloat(document.getElementById('nearFovY').value);
-            const farFovX = parseFloat(document.getElementById('farFovX').value);
-            const farFovY = parseFloat(document.getElementById('farFovY').value);
-            const nearDistance = parseFloat(document.getElementById('nearDistance').value);
-            const farDistance = parseFloat(document.getElementById('farDistance').value);
-            const dmSizeX = parseFloat(document.getElementById('dmSizeX').value);
-            const dmSizeY = parseFloat(document.getElementById('dmSizeY').value);
-            const dmModuleCountX = parseFloat(document.getElementById('dmModuleCountX').value);
-            const dmModuleCountY = parseFloat(document.getElementById('dmModuleCountY').value);
-            const distance = parseFloat(document.getElementById('distance').value);
-            
-            // Calculate angular field of view (constant for a given lens)
-            const angularFovX = 2 * Math.atan(nearFovX / (2 * nearDistance));
-            const angularFovY = 2 * Math.atan(nearFovY / (2 * nearDistance));
-            
-            // Calculate FOV at current distance
-            const fovX = 2 * distance * Math.tan(angularFovX / 2);
-            const fovY = 2 * distance * Math.tan(angularFovY / 2);
-            
-            document.getElementById('fovSize').textContent = `${fovX.toFixed(1)} × ${fovY.toFixed(1)}`;
-            
-            // Calculate pixels per mm
-            const pixelsPerMmX = resolutionX / fovX;
-            const pixelsPerMmY = resolutionY / fovY;
-            document.getElementById('pixelsPerMm').textContent = `${pixelsPerMmX.toFixed(2)} (X) × ${pixelsPerMmY.toFixed(2)} (Y)`;
-            
-            // Calculate module size in mm
-            const moduleSizeX = dmSizeX / dmModuleCountX;
-            const moduleSizeY = dmSizeY / dmModuleCountY;
-            document.getElementById('moduleSize').textContent = `${moduleSizeX.toFixed(3)} (X) × ${moduleSizeY.toFixed(3)} (Y)`;
-            
-            // Calculate pixel per module
-            const pixelPerModuleX = moduleSizeX * pixelsPerMmX;
-            const pixelPerModuleY = moduleSizeY * pixelsPerMmY;
-            document.getElementById('pixelPerModuleX').textContent = pixelPerModuleX.toFixed(2);
-            document.getElementById('pixelPerModuleY').textContent = pixelPerModuleY.toFixed(2);
-            
-            // Show results
-            document.getElementById('results').style.display = 'block';
-        }
+        // Initial calculation
+        calculatePixelPerModule();
+    });
+    
+    function calculatePixelPerModule() {
+        // Get input values
+        const resolutionX = parseFloat(document.getElementById('resolutionX').value);
+        const resolutionY = parseFloat(document.getElementById('resolutionY').value);
+        const nearFovX = parseFloat(document.getElementById('nearFovX').value);
+        const nearFovY = parseFloat(document.getElementById('nearFovY').value);
+        const farFovX = parseFloat(document.getElementById('farFovX').value);
+        const farFovY = parseFloat(document.getElementById('farFovY').value);
+        const nearDistance = parseFloat(document.getElementById('nearDistance').value);
+        const farDistance = parseFloat(document.getElementById('farDistance').value);
+        const dmSizeX = parseFloat(document.getElementById('dmSizeX').value);
+        const dmSizeY = parseFloat(document.getElementById('dmSizeY').value);
+        const dmModuleCountX = parseFloat(document.getElementById('dmModuleCountX').value);
+        const dmModuleCountY = parseFloat(document.getElementById('dmModuleCountY').value);
+        const distance = parseFloat(document.getElementById('distance').value);
+        
+        // Calculate interpolation factor (0 at near distance, 1 at far distance)
+        const t = (distance - nearDistance) / (farDistance - nearDistance);
+        
+        // Calculate FOV at current distance with perfect interpolation
+        const fovX = nearFovX + t * (farFovX - nearFovX);
+        const fovY = nearFovY + t * (farFovY - nearFovY);
+        
+        document.getElementById('fovSize').textContent = `${fovX.toFixed(1)} × ${fovY.toFixed(1)}`;
+        
+        // Calculate pixels per mm
+        const pixelsPerMmX = resolutionX / fovX;
+        const pixelsPerMmY = resolutionY / fovY;
+        document.getElementById('pixelsPerMm').textContent = `${pixelsPerMmX.toFixed(2)} (X) × ${pixelsPerMmY.toFixed(2)} (Y)`;
+        
+        // Calculate module size in mm
+        const moduleSizeX = dmSizeX / dmModuleCountX;
+        const moduleSizeY = dmSizeY / dmModuleCountY;
+        document.getElementById('moduleSize').textContent = `${moduleSizeX.toFixed(3)} (X) × ${moduleSizeY.toFixed(3)} (Y)`;
+        
+        // Calculate pixel per module
+        const pixelPerModuleX = moduleSizeX * pixelsPerMmX;
+        const pixelPerModuleY = moduleSizeY * pixelsPerMmY;
+        document.getElementById('pixelPerModuleX').textContent = pixelPerModuleX.toFixed(2);
+        document.getElementById('pixelPerModuleY').textContent = pixelPerModuleY.toFixed(2);
+        
+        // Show results
+        document.getElementById('results').style.display = 'block';
+    }
     </script>
 </body>
 </html>
