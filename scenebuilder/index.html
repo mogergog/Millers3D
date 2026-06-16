@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scene Builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- MENU BAR -->
+<div id="menubar">
+  <div class="menu-item" id="menu-file">File
+    <div class="menu-drop">
+      <div class="menu-entry" id="mi-new">New Scene <span class="shortcut">Ctrl+N</span></div>
+      <div class="menu-sep"></div>
+      <div class="menu-entry" id="mi-save">Save Scene <span class="shortcut">Ctrl+S</span></div>
+      <div class="menu-entry" id="mi-open">Open Scene… <span class="shortcut">Ctrl+O</span></div>
+      <div class="menu-sep"></div>
+      <div class="menu-entry" id="mi-imp-step">Import STEP/STL…</div>
+      <div class="menu-entry" id="mi-imp-gltf">Import glTF/GLB…</div>
+      <div class="menu-entry" id="mi-imp-obj">Import OBJ…</div>
+    </div>
+  </div>
+  <div class="menu-item" id="menu-add">Add
+    <div class="menu-drop">
+      <div class="menu-submenu-label">Lights</div>
+      <div class="menu-entry" id="mi-add-dirlight">💡 Directional Light</div>
+      <div class="menu-sep"></div>
+      <div class="menu-submenu-label">Primitives</div>
+      <div class="menu-entry" id="mi-add-box">📦 Box</div>
+      <div class="menu-entry" id="mi-add-sphere">⚪ Sphere</div>
+      <div class="menu-entry" id="mi-add-cylinder">🛢 Cylinder</div>
+      <div class="menu-entry" id="mi-add-plane">▭ Plane</div>
+      <div class="menu-entry" id="mi-add-cone">🔺 Cone</div>
+      <div class="menu-entry" id="mi-add-torus">🍩 Torus</div>
+    </div>
+  </div>
+  <div class="menu-item" id="menu-view">View
+    <div class="menu-drop">
+      <div class="menu-entry" id="mi-persp">Perspective</div>
+      <div class="menu-entry" id="mi-ortho">Orthographic</div>
+      <div class="menu-sep"></div>
+      <div class="menu-entry" id="mi-frame">Frame Selected <span class="shortcut">F</span></div>
+      <div class="menu-entry" id="mi-frame-all">Frame All</div>
+      <div class="menu-sep"></div>
+      <div class="menu-entry" id="mi-grid">Toggle Grid <span class="shortcut">G</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- HEADER BAR -->
+<div id="headerbar">
+  <div style="display:flex;gap:2px">
+    <button class="hb-btn active" id="btn-persp">Persp</button>
+    <button class="hb-btn" id="btn-ortho">Ortho</button>
+  </div>
+  <div class="hb-sep"></div>
+  <button class="hb-btn active" id="btn-grid">Grid</button>
+  <div class="hb-spacer"></div>
+  <span class="hb-label" id="mode-label">Select</span>
+  <span class="snap-badge" id="snap-label" style="display:none">⊞ SNAP</span>
+</div>
+
+<!-- MAIN -->
+<div id="main">
+
+  <!-- LEFT TOOLBAR -->
+  <div id="toolbar">
+    <button class="tool-btn active" data-mode="select" title="Select (Q)"><span>↖</span></button>
+    <button class="tool-btn" data-mode="edit" title="Face Paint (E)"><span>🖌</span></button>
+    <button class="tool-btn" data-mode="measure" title="Distance (M)"><span>📏</span></button>
+    <button class="tool-btn" data-mode="angle" title="Angle (N)"><span>📐</span></button>
+    <div class="tool-sep"></div>
+    <button class="tool-btn active" data-gizmo="translate" title="Move (W)"><span>✛</span></button>
+    <button class="tool-btn" data-gizmo="rotate" title="Rotate (R)"><span>↻</span></button>
+    <button class="tool-btn" data-gizmo="scale" title="Scale (S)"><span>⤡</span></button>
+  </div>
+
+  <!-- VIEWPORT -->
+  <div id="canvas-wrap">
+    <div id="loading">Loading…</div>
+    <div id="vp-label">Perspective</div>
+    <div id="np-hint">Np1/3/7 views · Np5 Persp/Ortho · Np9 Flip · Np2/4/6/8 Orbit · Np0 Cam · Np. Frame</div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div id="rpanel">
+
+    <!-- TOP: Scene Outliner (always visible) -->
+    <div id="rp-top">
+      <div id="rp-top-head">
+        <span>🌐 Scene</span>
+        <div style="margin-left:auto;display:flex;gap:3px">
+          <button class="sm-btn" id="btn-group" title="Group selected">⊞</button>
+          <button class="sm-btn" id="btn-ungroup" title="Ungroup">⊟</button>
+        </div>
+      </div>
+      <div id="rp-top-body">
+        <div class="scene-bg-row">
+          <span class="prop-label">Background</span>
+          <div class="color-swatch" id="cs-bg">
+            <input type="color" id="bg-color" value="#1b1b1b">
+            <div class="color-swatch-preview" id="csp-bg" style="background:#1b1b1b"></div>
+          </div>
+        </div>
+        <div class="scene-bg-row">
+          <span class="prop-label">Ambient</span>
+          <div class="dn" data-min="0" data-max="5" data-step="0.05" data-tf="amb-int" style="flex:1"><div class="dn-track" style="width:30%"></div><input class="dn-input" type="text" id="amb-int" value="1.5"></div>
+        </div>
+        <div class="scene-bg-row">
+          <span class="prop-label">Sky / Ground</span>
+          <div class="color-swatch" id="cs-sky" style="flex:1"><input type="color" id="amb-sky" value="#ffffff"><div class="color-swatch-preview" id="csp-sky" style="background:#ffffff"></div></div>
+          <div class="color-swatch" id="cs-gnd" style="flex:1"><input type="color" id="amb-ground" value="#444444"><div class="color-swatch-preview" id="csp-gnd" style="background:#444444"></div></div>
+        </div>
+        <div class="scene-bg-row">
+          <span class="prop-label">Shadows</span>
+          <label class="tgl"><input type="checkbox" id="shadow-toggle" checked><span class="tgl-track"></span></label>
+        </div>
+        <div class="obj-list" id="obj-list"><span class="hint">Empty scene — use the Add menu to add lights or primitives.</span></div>
+      </div>
+    </div>
+
+    <div id="rp-resize"></div>
+
+    <!-- BOTTOM: Tabbed properties -->
+    <div id="rp-bot">
+      <div id="rp-bot-head">⚙ Properties</div>
+      <div id="rp-body">
+
+        <!-- Contextual: shown when nothing selected -->
+        <div id="props-empty" class="props-pane">
+          <div class="rp-sec">
+            <div class="rp-sec-head" data-sec="annot-def">📐 Annotation Defaults <span class="rp-chev">▾</span></div>
+            <div class="rp-sec-body hidden" id="sec-annot-def">
+              <div class="prop-row"><span class="prop-label">Arrow color</span>
+                <div class="color-swatch" id="cs-arr"><input type="color" id="arrow-color" value="#111111"><div class="color-swatch-preview" id="csp-arr" style="background:#111111"></div></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">Thickness</span>
+                <div class="dn" data-min="0.1" data-max="50" data-step="0.5" data-tf="arrow-thickness"><div class="dn-track"></div><input class="dn-input" type="text" id="arrow-thickness" value="3"></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">Head length</span>
+                <div class="dn" data-min="0.1" data-max="200" data-step="1" data-tf="arrow-head-len"><div class="dn-track"></div><input class="dn-input" type="text" id="arrow-head-len" value="8"></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">Head width</span>
+                <div class="dn" data-min="0.1" data-max="200" data-step="1" data-tf="arrow-head-wid"><div class="dn-track"></div><input class="dn-input" type="text" id="arrow-head-wid" value="4"></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">Direction</span>
+                <select id="arrow-dir"><option value="out">Outward ←→</option><option value="in">Inward →←</option><option value="none">None</option></select>
+              </div>
+              <div class="subsec-lbl">Label</div>
+              <div class="prop-row"><span class="prop-label">Text</span>
+                <input type="text" id="meas-text-override" placeholder="Auto" class="text-inp">
+              </div>
+              <div class="prop-row"><span class="prop-label">Font size</span>
+                <div class="dn" data-min="6" data-max="72" data-step="1" data-tf="label-size"><div class="dn-track"></div><input class="dn-input" type="text" id="label-size" value="14"></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">Text color</span>
+                <div class="color-swatch" id="cs-ltc"><input type="color" id="label-color" value="#ffffff"><div class="color-swatch-preview" id="csp-ltc" style="background:#ffffff"></div></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">BG color</span>
+                <div class="color-swatch" id="cs-lbg"><input type="color" id="label-bg" value="#111111"><div class="color-swatch-preview" id="csp-lbg" style="background:#111111"></div></div>
+              </div>
+              <div class="prop-row"><span class="prop-label">BG opacity</span>
+                <div class="dn" data-min="0" data-max="100" data-step="1" data-tf="label-bg-opacity"><div class="dn-track"></div><input class="dn-input" type="text" id="label-bg-opacity" value="80"></div>
+              </div>
+            </div>
+          </div>
+          <div class="empty-hint">Select an item in the Scene to edit its properties.</div>
+        </div>
+
+        <!-- Contextual: OBJECT properties -->
+        <div id="props-object" class="props-pane" style="display:none">
+          <div class="rp-sec">
+            <div class="rp-sec-head" data-sec="tf-sec">⊹ Transform <span class="rp-chev">▾</span></div>
+            <div class="rp-sec-body" id="sec-tf-sec">
+              <div id="transform-ui" style="display:flex;flex-direction:column;gap:4px">
+                <div class="subsec-lbl">Position</div>
+                <div class="prop-3col">
+                  <div class="ax"><span class="ax-lbl x">X</span><div class="dn" data-min="-1e6" data-max="1e6" data-step="0.1" data-tf="px"><div class="dn-track"></div><input class="dn-input" type="text" id="px" value="0"></div></div>
+                  <div class="ax"><span class="ax-lbl y">Y</span><div class="dn" data-min="-1e6" data-max="1e6" data-step="0.1" data-tf="py"><div class="dn-track"></div><input class="dn-input" type="text" id="py" value="0"></div></div>
+                  <div class="ax"><span class="ax-lbl z">Z</span><div class="dn" data-min="-1e6" data-max="1e6" data-step="0.1" data-tf="pz"><div class="dn-track"></div><input class="dn-input" type="text" id="pz" value="0"></div></div>
+                </div>
+                <div class="subsec-lbl">Rotation °</div>
+                <div class="prop-3col">
+                  <div class="ax"><span class="ax-lbl x">X</span><div class="dn" data-min="-360" data-max="360" data-step="1" data-tf="rx"><div class="dn-track"></div><input class="dn-input" type="text" id="rx" value="0"></div></div>
+                  <div class="ax"><span class="ax-lbl y">Y</span><div class="dn" data-min="-360" data-max="360" data-step="1" data-tf="ry"><div class="dn-track"></div><input class="dn-input" type="text" id="ry" value="0"></div></div>
+                  <div class="ax"><span class="ax-lbl z">Z</span><div class="dn" data-min="-360" data-max="360" data-step="1" data-tf="rz"><div class="dn-track"></div><input class="dn-input" type="text" id="rz" value="0"></div></div>
+                </div>
+                <div class="subsec-lbl">Scale</div>
+                <div class="prop-3col">
+                  <div class="ax"><span class="ax-lbl x">X</span><div class="dn" data-min="0.001" data-max="1000" data-step="0.01" data-tf="sx"><div class="dn-track"></div><input class="dn-input" type="text" id="sx" value="1"></div></div>
+                  <div class="ax"><span class="ax-lbl y">Y</span><div class="dn" data-min="0.001" data-max="1000" data-step="0.01" data-tf="sy"><div class="dn-track"></div><input class="dn-input" type="text" id="sy" value="1"></div></div>
+                  <div class="ax"><span class="ax-lbl z">Z</span><div class="dn" data-min="0.001" data-max="1000" data-step="0.01" data-tf="sz"><div class="dn-track"></div><input class="dn-input" type="text" id="sz" value="1"></div></div>
+                </div>
+                <div class="subsec-lbl">Dimensions (mm)</div>
+                <div class="dim-readout" id="dim-readout">
+                  <span class="dim-cell"><b class="x">W</b><input type="text" class="dim-inp" id="dim-x" value="—"></span>
+                  <span class="dim-cell"><b class="y">D</b><input type="text" class="dim-inp" id="dim-y" value="—"></span>
+                  <span class="dim-cell"><b class="z">H</b><input type="text" class="dim-inp" id="dim-z" value="—"></span>
+                </div>
+                <button class="sm-btn danger w100" id="btn-delete">Delete Object</button>
+              </div>
+            </div>
+          </div>
+          <div class="rp-sec" id="obj-mat-sec">
+            <div class="rp-sec-head" data-sec="mat-sec">🎨 Material <span class="rp-chev">▾</span></div>
+            <div class="rp-sec-body" id="sec-mat-sec">
+              <div id="material-ui" style="display:flex;flex-direction:column;gap:4px">
+                <div class="prop-row"><span class="prop-label">Metalness</span>
+                  <div class="dn" data-min="0" data-max="1" data-step="0.01" data-tf="metalness"><div class="dn-track"></div><input class="dn-input" type="text" id="metalness" value="0.6"></div>
+                </div>
+                <div class="prop-row"><span class="prop-label">Roughness</span>
+                  <div class="dn" data-min="0" data-max="1" data-step="0.01" data-tf="roughness"><div class="dn-track"></div><input class="dn-input" type="text" id="roughness" value="0.3"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="rp-sec" id="sec-paint-wrap" style="display:none">
+            <div class="rp-sec-head" data-sec="paint-sec">🖌 Face Paint <span class="rp-chev">▾</span></div>
+            <div class="rp-sec-body" id="sec-paint-sec">
+              <div class="hint">Hover to highlight · Click to paint</div>
+              <div class="prop-row"><span class="prop-label">Color</span>
+                <div class="color-swatch" id="cs-paint"><input type="color" id="paint-color" value="#4772b3"><div class="color-swatch-preview" id="csp-paint" style="background:#4772b3"></div></div>
+              </div>
+              <div id="face-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Contextual: LIGHT properties (single light card injected here) -->
+        <div id="props-light" class="props-pane" style="display:none">
+          <div class="rp-sec">
+            <div class="rp-sec-head">💡 <span id="light-prop-title">Light</span></div>
+            <div class="rp-sec-body" id="light-prop-body"></div>
+          </div>
+        </div>
+
+        <!-- Contextual: ANNOTATION properties (editor injected here) -->
+        <div id="props-annot" class="props-pane" style="display:none">
+          <div class="rp-sec">
+            <div class="rp-sec-head">📐 <span id="annot-prop-title">Annotation</span></div>
+            <div class="rp-sec-body" id="annot-prop-body"></div>
+          </div>
+        </div>
+
+      </div><!-- /rp-body -->
+    </div><!-- /rp-bot -->
+  </div><!-- /rpanel -->
+
+  <div id="rp-toggle">▶</div>
+
+</div><!-- /main -->
+
+<!-- STATUS BAR -->
+<div id="statusbar">
+  <span>Mode: <b id="st-mode">Select</b></span>
+  <span>Sel: <b id="st-sel">—</b></span>
+  <span>Objects: <b id="st-objs">0</b></span>
+  <div style="flex:1"></div>
+  <span>LMB Orbit · MMB Pan · Scroll Zoom · W/R/S Gizmo · Q/E/M Mode · Ctrl=Snap · Shift=Multi-select</span>
+</div>
+
+<!-- HIDDEN FILE INPUTS -->
+<input type="file" id="fi-step"  accept=".stl,.step,.stp" style="display:none">
+<input type="file" id="fi-gltf" accept=".gltf,.glb"      style="display:none">
+<input type="file" id="fi-obj"  accept=".obj"             style="display:none">
+<input type="file" id="fi-scene" accept=".cadscene"       style="display:none">
+
+<script src="./vendor/occt/occt-import-js.js"></script>
+<script type="importmap">{"imports":{"three":"./vendor/three/build/three.module.js","three/addons/":"./vendor/three/jsm/"}}</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
