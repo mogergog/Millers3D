@@ -27,6 +27,10 @@ perspCam.position.set(600, -600, 400); perspCam.up.set(0, 0, 1); perspCam.lookAt
 orthoCam.position.copy(perspCam.position); orthoCam.up.set(0, 0, 1);
 renderCam.position.set(300, -800, 300); renderCam.up.set(0, 0, 1); renderCam.lookAt(0, 0, 0);
 let activeCam = perspCam, isOrtho = false, usingRenderCam = false;
+let gizmoMode = 'translate';   // current transform gizmo mode (translate/rotate/scale)
+// Replace a panel-body node with a clone to drop any previously-attached listeners
+// (prevents stale closures from older selections firing on the reused element).
+function freshPanelBody(idStr) { const old = document.getElementById(idStr); const f = old.cloneNode(false); old.parentNode.replaceChild(f, old); return f; }
 let localViewActive = false, localViewHidden = [];
 
 function setOrthoFrustum() {
@@ -34,6 +38,29 @@ function setOrthoFrustum() {
   const a = Math.max(wrap.clientWidth, 1) / Math.max(wrap.clientHeight, 1);
   const s = Math.max(1, d * .5);
   orthoCam.left = -s*a; orthoCam.right = s*a; orthoCam.top = s; orthoCam.bottom = -s;
+  // Fit near/far to the whole scene so nothing gets clipped while orbiting in ortho.
+  // We measure scene extent along the camera's view direction from the camera origin.
+  const box = new THREE.Box3();
+  objects.forEach(o => { if (o.visible !== false) box.expandByObject(o.group); });
+  let near, far;
+  if (box.isEmpty()) {
+    near = -1e6; far = 1e6;
+  } else {
+    const dir = new THREE.Vector3(); orthoCam.getWorldDirection(dir);
+    const camPos = orthoCam.position;
+    // Project all 8 box corners onto the view axis; near/far bracket them with margin.
+    const min = box.min, max = box.max; let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const corner = new THREE.Vector3(i&1?max.x:min.x, i&2?max.y:min.y, i&4?max.z:min.z);
+      const t = corner.sub(camPos).dot(dir);
+      if (t < lo) lo = t; if (t > hi) hi = t;
+    }
+    const margin = Math.max((hi - lo) * 0.5, d, 100);
+    near = lo - margin; far = hi + margin;
+    // Ortho cameras allow negative near; keep a sane minimum span
+    if (far - near < 1) far = near + 1;
+  }
+  orthoCam.near = near; orthoCam.far = far;
   orthoCam.updateProjectionMatrix();
 }
 function switchCam(ortho, name) {
@@ -59,6 +86,18 @@ tfCtrl.addEventListener('objectChange', () => {
   refreshTfUI();
   if (selected && tfCtrl.object === selected.group) updateShadowCameras();
   dirLights.forEach(l => { if (l.pivot === tfCtrl.object) syncLightFromPivot(l); });
+  // Camera moved via gizmo -> sync helper + live position fields
+  cameras.forEach(c => { if (c.pivot === tfCtrl.object) {
+    c.helper.update();
+    if (selectedCamera === c) {
+      const body = document.getElementById('cam-prop-body');
+      const setF = (cls, val) => { const inp = body?.querySelector(`.${cls} .dn-input`); if (inp && document.activeElement !== inp) { inp.value = (+val).toFixed(2); const dn = inp.closest('.dn'); const mn = parseFloat(dn.dataset.min), mx = parseFloat(dn.dataset.max), tr = dn.querySelector('.dn-track'); if (tr) tr.style.width = Math.max(0, Math.min(100, (val - mn)/(mx - mn)*100)) + '%'; } };
+      setF('cam-px', c.pivot.position.x); setF('cam-py', c.pivot.position.y); setF('cam-pz', c.pivot.position.z);
+      setF('cam-rx', THREE.MathUtils.radToDeg(c.pivot.rotation.x));
+      setF('cam-ry', THREE.MathUtils.radToDeg(c.pivot.rotation.y));
+      setF('cam-rz', THREE.MathUtils.radToDeg(c.pivot.rotation.z));
+    }
+  }});
   // Measurement handle moved via gizmo -> update the underlying point
   if (gizmoHandle && gizmoHandleMeas && tfCtrl.object === gizmoHandle) {
     const m = gizmoHandleMeas, pt = gizmoHandle.position.clone(), hi = m.handles.indexOf(gizmoHandle);
@@ -138,11 +177,11 @@ function syncLightPropPanel(e) {
 }
 
 function selectLight(e) {
-  // Deselect objects + annotations
-  setSelected(null); selectedMeas = null; selectedLight = e;
+  // Deselect objects + annotations + cameras
+  setSelected(null); selectedMeas = null; selectedCamera = null; selectedLight = e;
   detachHandleGizmo(); updateMeasHandleVis();
   // Attach move gizmo to the light pivot only if its gizmo marker is visible
-  if (e.gizmoVisible !== false && e.visible !== false) { tfCtrl.setMode('translate'); tfCtrl.attach(e.pivot); tfCtrl.enabled = true; }
+  if (e.gizmoVisible !== false && e.visible !== false) { tfCtrl.setMode(gizmoMode); tfCtrl.attach(e.pivot); tfCtrl.enabled = true; }
   else tfCtrl.detach();
   showLightProperties(e);
   refreshOutliner();
@@ -153,7 +192,7 @@ function showLightProperties(e) {
   document.querySelectorAll('.props-pane').forEach(p => p.style.display = 'none');
   document.getElementById('props-light').style.display = '';
   document.getElementById('light-prop-title').textContent = e.name;
-  const id = e.id, root = document.getElementById('light-prop-body');
+  const id = e.id, root = freshPanelBody('light-prop-body');
   root.innerHTML = `
     <div class="prop-row"><span class="prop-label">Intensity</span>
       <div class="dn" data-min="0" data-max="10" data-step="0.05"><div class="dn-track"></div><input class="dn-input" type="text" id="lint${id}" value="${e.intensity}"></div>
@@ -202,6 +241,419 @@ function deleteLight(e) {
   refreshOutliner();
 }
 
+// ══ CAMERAS ════════════════════════════════════════════════════════════════════
+// Cameras behave like scene objects: listed in the outliner, named, groupable,
+// move-gizmo when selected, marker (frustum) that can be toggled. Two kinds:
+//   '2d' → renders an image (PNG) the camera "sees"
+//   '3d' → projects a grid of rays in its frustum and captures a point cloud
+let cameras = [], cameraId = 1, selectedCamera = null;
+let camGroups = [], camMultiSel = new Set();
+let shownCamera = null;   // camera currently previewed in the viewport
+
+const FILM_GAUGE = 36;    // mm sensor width used to relate focal length <-> FOV
+
+function makeCamera(kind, opts = {}, selectAfter = true) {
+  const id = cameraId++;
+  const resX = opts.resX || (kind === '3d' ? 64 : 1920);
+  const resY = opts.resY || (kind === '3d' ? 48 : 1080);
+  const aspect = resX / resY;
+  const scan = (opts.scanDistance != null) ? opts.scanDistance : (kind === '3d' ? 1000 : 5000);
+  const threeCam = (opts.projection === 'orthographic')
+    ? new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, scan)
+    : new THREE.PerspectiveCamera(opts.fov || 50, aspect, 0.1, scan);
+  threeCam.filmGauge = FILM_GAUGE;
+  threeCam.up.set(0, 0, 1);
+
+  // Pivot group carries the camera + marker; moving/rotating the pivot moves the camera.
+  // Default: at the origin, looking straight DOWN -Z, no rotation.
+  const pivot = new THREE.Group();
+  pivot.position.set(...(opts.pos || [ (cameras.length * 40), 0, 0 ]));
+  // A camera looks down its local -Z. We want it to look down WORLD -Z with no
+  // rotation, which is the camera's natural orientation, so leave rotation = identity.
+  if (opts.rot) pivot.rotation.set(opts.rot[0], opts.rot[1], opts.rot[2]);
+  pivot.add(threeCam);
+  scene.add(pivot);
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(12, 12, 18),
+    new THREE.MeshBasicMaterial({ color: kind === '3d' ? 0x55ccff : 0xff8844 }));
+  body.castShadow = body.receiveShadow = false;
+  pivot.add(body);
+
+  const helper = new THREE.CameraHelper(threeCam);
+  scene.add(helper);
+
+  const e = {
+    id, kind, name: (kind === '3d' ? '3D Camera ' : '2D Camera ') + id,
+    threeCam, pivot, body, helper,
+    visible: true, gizmoVisible: true, _group: null,
+    resX, resY,
+    // 2D
+    projection: opts.projection || 'perspective',
+    focalMode: opts.focalMode || 'fov',
+    focalLength: opts.focalLength || 35,
+    fov: opts.fov || 50,
+    orthoHeight: opts.orthoHeight || 200,
+    // 3D + capture range (both kinds): clearance = near cutoff, scanDistance = far cutoff
+    clearance: (opts.clearance != null) ? opts.clearance : 0,   // points closer than this are ignored
+    scanDistance: scan,                                          // max capture / far plane
+    fovMode: opts.fovMode || 'angle',
+    fov3d: opts.fov3d || 50,
+    fov3dMm: opts.fov3dMm || 200,
+    pointMode: opts.pointMode || 'first-color',
+  };
+  cameras.push(e);
+  applyCameraParams(e);
+  updateCameraMarker(e);
+  refreshOutliner();
+  if (selectAfter) selectCamera(e);
+  return e;
+}
+
+// Push current params into the THREE camera + helper
+function applyCameraParams(e) {
+  const cam = e.threeCam;
+  const aspect = Math.max(e.resX, 1) / Math.max(e.resY, 1);
+  const near = Math.max(0.01, e.clearance || 0.01);   // clearance = near cutoff
+  const far  = Math.max(near + 1, e.scanDistance || 5000);
+  if (e.kind === '2d' && e.projection === 'orthographic') {
+    if (!cam.isOrthographicCamera) { e.threeCam = rebuildThreeCam(e, 'orthographic'); }
+    const c = e.threeCam, h = e.orthoHeight / 2, w = h * aspect;
+    c.left = -w; c.right = w; c.top = h; c.bottom = -h; c.near = near; c.far = far;
+    c.updateProjectionMatrix();
+  } else {
+    if (!e.threeCam.isPerspectiveCamera) { e.threeCam = rebuildThreeCam(e, 'perspective'); }
+    const c = e.threeCam;
+    c.aspect = aspect;
+    if (e.kind === '3d') {
+      c.fov = (e.fovMode === 'angle') ? e.fov3d : THREE.MathUtils.radToDeg(2 * Math.atan((e.fov3dMm/2) / 100));
+    } else {
+      if (e.focalMode === 'focal') { c.setFocalLength(e.focalLength); e.fov = c.fov; }
+      else c.fov = e.fov;
+    }
+    c.near = near; c.far = far;
+    c.updateProjectionMatrix();
+  }
+  if (e.helper) { e.helper.camera = e.threeCam; e.helper.update(); }
+}
+
+// Rebuild the THREE camera when projection type changes, preserving transform
+function rebuildThreeCam(e, projection) {
+  const old = e.threeCam;
+  const aspect = Math.max(e.resX,1) / Math.max(e.resY,1);
+  const far = Math.max(1, e.scanDistance || 5000);
+  const c = (projection === 'orthographic')
+    ? new THREE.OrthographicCamera(-100,100,100,-100, 0.1, far)
+    : new THREE.PerspectiveCamera(e.fov||50, aspect, 0.1, far);
+  c.filmGauge = FILM_GAUGE; c.up.set(0,0,1);
+  c.position.copy(old.position); c.quaternion.copy(old.quaternion);
+  e.pivot.remove(old); e.pivot.add(c);
+  if (e.helper) { scene.remove(e.helper); e.helper.dispose?.(); e.helper = new THREE.CameraHelper(c); scene.add(e.helper); }
+  return c;
+}
+
+function updateCameraMarker(e) {
+  const on = e.visible !== false;
+  const gizmoOn = e.gizmoVisible !== false && on;
+  // The camera body + frustum together ARE the camera's visual marker — hiding the
+  // gizmo hides both. (The underlying view camera still works for Show/Render.)
+  e.body.visible = gizmoOn;
+  e.helper.visible = gizmoOn;
+  e.helper.update();
+  if (!gizmoOn && tfCtrl.object === e.pivot) tfCtrl.detach();
+}
+
+function selectCamera(e) {
+  setSelected(null); selectedLight = null; selectedMeas = null; selectedCamera = e;
+  detachHandleGizmo();
+  if (e.gizmoVisible !== false && e.visible !== false) { tfCtrl.setMode(gizmoMode); tfCtrl.attach(e.pivot); tfCtrl.enabled = true; }
+  else tfCtrl.detach();
+  showCameraProperties(e);
+  refreshOutliner();
+}
+
+function deleteCamera(e) {
+  if (e._group) { const g = e._group; g.members = g.members.filter(x => x !== e); if (g.members.length < 2) dissolveCamGroup(g); }
+  if (shownCamera === e) exitCameraView();
+  scene.remove(e.pivot); scene.remove(e.helper); e.helper.dispose?.();
+  cameras = cameras.filter(c => c !== e);
+  camMultiSel.delete(e.id);
+  if (selectedCamera === e) { selectedCamera = null; tfCtrl.detach(); showPropertiesForSelection(); }
+  refreshOutliner();
+}
+
+// Keep pivot/threeCam/helper in sync after gizmo move
+function syncCameraFromPivot(e) { e.helper.update(); if (shownCamera === e) {/* live view follows automatically */} }
+
+// ── Camera grouping (drag & drop, same pattern as lights) ──
+function addCameraToGroup(camId, cg) {
+  const c = cameras.find(x => x.id === camId); if (!c || !cg) return;
+  if (c._group === cg) return;
+  if (c._group) { c._group.members = c._group.members.filter(x => x !== c); if (c._group.members.length < 2) dissolveCamGroup(c._group); }
+  c._group = cg; if (!cg.members.includes(c)) cg.members.push(c);
+  cg._expanded = true; refreshOutliner();
+}
+function removeCameraFromGroup(camId) {
+  const c = cameras.find(x => x.id === camId); if (!c || !c._group) return;
+  const g = c._group; g.members = g.members.filter(x => x !== c); c._group = null;
+  if (g.members.length < 2) dissolveCamGroup(g);
+  refreshOutliner();
+}
+function dissolveCamGroup(g) { (g.members||[]).forEach(c => c._group = null); camGroups = camGroups.filter(x => x !== g); }
+function toggleCamMultiSel(c) { if (camMultiSel.has(c.id)) camMultiSel.delete(c.id); else camMultiSel.add(c.id); selectCamera(c); }
+
+// ── Show / exit camera preview ──
+function showCameraView(e) {
+  applyCameraParams(e);
+  e.threeCam.updateMatrixWorld(true);
+  shownCamera = e; usingRenderCam = false;
+  orbit.enabled = false;
+  document.getElementById('cam-view-bar').style.display = 'flex';
+  document.getElementById('cam-view-name').textContent = '🎥 ' + e.name;
+  setVP(e.name + ' (camera view)');
+}
+function exitCameraView() {
+  shownCamera = null;
+  orbit.enabled = true;
+  document.getElementById('cam-view-bar').style.display = 'none';
+  setVP(isOrtho ? 'Orthographic' : 'Perspective');
+}
+
+// ── Camera properties panel (rendered differently from objects) ──
+function showCameraProperties(e) {
+  document.querySelectorAll('.props-pane').forEach(p => p.style.display = 'none');
+  document.getElementById('props-camera').style.display = '';
+  document.getElementById('cam-prop-icon').textContent = e.kind === '3d' ? '📷' : '🎥';
+  document.getElementById('cam-prop-title').textContent = e.name;
+  const id = e.id, root = freshPanelBody('cam-prop-body');
+  const p = e.pivot.position;
+  const dn = (cls, mn, mx, st, v) => `<div class="dn ${cls}" data-min="${mn}" data-max="${mx}" data-step="${st}" style="flex:1"><div class="dn-track"></div><input class="dn-input" type="text" value="${v}"></div>`;
+  const seg = (cls, opts, cur) => `<div class="cam-seg ${cls}">${opts.map(([v,t])=>`<button data-v="${v}" class="${cur===v?'active':''}">${t}</button>`).join('')}</div>`;
+
+  let kindFields = '';
+  if (e.kind === '2d') {
+    kindFields = `
+      <div class="cam-field"><span>Projection</span>${seg('cam-proj',[['perspective','Perspective'],['orthographic','Orthographic']], e.projection)}</div>
+      <div class="cam-field cam-lens" style="${e.projection==='orthographic'?'display:none':''}"><span>Lens by</span>${seg('cam-focalmode',[['fov','FOV°'],['focal','Focal mm']], e.focalMode)}</div>
+      <div class="cam-field cam-fov-row" style="${(e.projection==='orthographic'||e.focalMode!=='fov')?'display:none':''}"><span>FOV (°)</span>${dn('cam-fov',1,170,1,e.fov)}</div>
+      <div class="cam-field cam-focal-row" style="${(e.projection==='orthographic'||e.focalMode!=='focal')?'display:none':''}"><span>Focal (mm)</span>${dn('cam-focal',4,800,1,e.focalLength)}</div>
+      <div class="cam-field cam-ortho-row" style="${e.projection!=='orthographic'?'display:none':''}"><span>Frame H (mm)</span>${dn('cam-orthoh',1,5000,1,e.orthoHeight)}</div>
+      <div class="cam-field"><span>Clearance (mm)</span>${dn('cam-clear',0,100000,1,e.clearance)}</div>
+      <div class="cam-field"><span>Scan dist (mm)</span>${dn('cam-scan',1,1e7,10,e.scanDistance)}</div>`;
+  } else {
+    kindFields = `
+      <div class="cam-field"><span>Clearance (mm)</span>${dn('cam-clear',0,100000,1,e.clearance)}</div>
+      <div class="cam-field"><span>Scan dist (mm)</span>${dn('cam-scan',1,1e7,10,e.scanDistance)}</div>
+      <div class="cam-field"><span>FOV by</span>${seg('cam-fovmode',[['angle','Angle°'],['mm','mm']], e.fovMode)}</div>
+      <div class="cam-field cam-fov3-row" style="${e.fovMode!=='angle'?'display:none':''}"><span>FOV (°)</span>${dn('cam-fov3',1,170,1,e.fov3d)}</div>
+      <div class="cam-field cam-fov3mm-row" style="${e.fovMode!=='mm'?'display:none':''}"><span>FOV plane (mm)</span>${dn('cam-fov3mm',1,5000,1,e.fov3dMm)}</div>
+      <div class="cam-field"><span>Capture</span>${seg('cam-ptmode',[['first','First hit'],['first-color','First+color'],['all','All hits']], e.pointMode)}</div>`;
+  }
+
+  root.innerHTML = `
+    <div class="cam-field"><span>Resolution X</span>${dn('cam-resx',1,8192,1,e.resX)}</div>
+    <div class="cam-field"><span>Resolution Y</span>${dn('cam-resy',1,8192,1,e.resY)}</div>
+    ${kindFields}
+    <div class="subsec-lbl">Position</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span>${dn('cam-px',-1e6,1e6,1,+p.x.toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl y">Y</span>${dn('cam-py',-1e6,1e6,1,+p.y.toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl z">Z</span>${dn('cam-pz',-1e6,1e6,1,+p.z.toFixed(2))}</div>
+    </div>
+    <div class="subsec-lbl">Rotation °</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span>${dn('cam-rx',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.x).toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl y">Y</span>${dn('cam-ry',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.y).toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl z">Z</span>${dn('cam-rz',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.z).toFixed(2))}</div>
+    </div>
+    <div class="btn-row" style="margin-top:6px">
+      <button class="sm-btn" id="cam-aim${id}" title="Aim at scene center">Aim at scene</button>
+      <button class="sm-btn" id="cam-show${id}">${shownCamera===e?'Exit view':'Show view'}</button>
+    </div>
+    <button class="sm-btn w100" id="cam-render${id}" style="margin-top:4px">${e.kind==='3d'?'Render point cloud ▼':'Render image (PNG)'}</button>
+    <button class="sm-btn danger w100" id="cam-del${id}" style="margin-top:6px">Delete Camera</button>`;
+  initDNs(root);
+
+  // Segmented buttons
+  root.querySelectorAll('.cam-seg').forEach(seg => {
+    seg.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      seg.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const v = b.dataset.v;
+      if (seg.classList.contains('cam-proj')) e.projection = v;
+      else if (seg.classList.contains('cam-focalmode')) e.focalMode = v;
+      else if (seg.classList.contains('cam-fovmode')) e.fovMode = v;
+      else if (seg.classList.contains('cam-ptmode')) e.pointMode = v;
+      applyCameraParams(e);
+      showCameraProperties(e);   // re-render to toggle conditional rows
+    }));
+  });
+
+  root.addEventListener('dnchange', ev => {
+    const dnEl = ev.target.closest('.dn'); if (!dnEl) return;
+    const v = ev.detail.value;
+    if (dnEl.classList.contains('cam-resx')) e.resX = Math.round(v);
+    else if (dnEl.classList.contains('cam-resy')) e.resY = Math.round(v);
+    else if (dnEl.classList.contains('cam-fov')) e.fov = v;
+    else if (dnEl.classList.contains('cam-focal')) e.focalLength = v;
+    else if (dnEl.classList.contains('cam-orthoh')) e.orthoHeight = v;
+    else if (dnEl.classList.contains('cam-clear')) e.clearance = v;
+    else if (dnEl.classList.contains('cam-scan')) e.scanDistance = v;
+    else if (dnEl.classList.contains('cam-fov3')) e.fov3d = v;
+    else if (dnEl.classList.contains('cam-fov3mm')) e.fov3dMm = v;
+    else if (dnEl.classList.contains('cam-px')) e.pivot.position.x = v;
+    else if (dnEl.classList.contains('cam-py')) e.pivot.position.y = v;
+    else if (dnEl.classList.contains('cam-pz')) e.pivot.position.z = v;
+    else if (dnEl.classList.contains('cam-rx')) e.pivot.rotation.x = THREE.MathUtils.degToRad(v);
+    else if (dnEl.classList.contains('cam-ry')) e.pivot.rotation.y = THREE.MathUtils.degToRad(v);
+    else if (dnEl.classList.contains('cam-rz')) e.pivot.rotation.z = THREE.MathUtils.degToRad(v);
+    e.pivot.updateMatrixWorld(true);
+    applyCameraParams(e); updateCameraMarker(e);
+  });
+
+  root.querySelector(`#cam-aim${id}`).addEventListener('click', () => {
+    const b = new THREE.Box3(); objects.forEach(o => { if (o.visible !== false) b.expandByObject(o.group); });
+    const c = b.isEmpty() ? new THREE.Vector3(0,0,0) : b.getCenter(new THREE.Vector3());
+    // The child camera looks down the pivot's local -Z. Matrix4.lookAt(eye,target,up)
+    // builds an orientation whose -Z points from eye toward target — exactly the
+    // camera convention — so the camera ends up looking AT the scene center.
+    const m = new THREE.Matrix4();
+    m.lookAt(e.pivot.position, c, new THREE.Vector3(0, 0, 1));
+    e.pivot.quaternion.setFromRotationMatrix(m);
+    e.pivot.updateMatrixWorld(true); e.helper.update();
+    showCameraProperties(e);
+  });
+  root.querySelector(`#cam-show${id}`).addEventListener('click', () => {
+    if (shownCamera === e) exitCameraView(); else showCameraView(e);
+    showCameraProperties(e);
+  });
+  root.querySelector(`#cam-render${id}`).addEventListener('click', () => {
+    if (e.kind === '3d') renderPointCloud(e); else renderCameraImage(e);
+  });
+  root.querySelector(`#cam-del${id}`).addEventListener('click', () => { if (confirm(`Delete camera "${e.name}"? This cannot be undone.`)) deleteCamera(e); });
+}
+
+// ── Render modal helper ──
+function showRenderModal(title, contentEl, actions) {
+  const modal = document.getElementById('render-modal');
+  document.getElementById('render-modal-title').textContent = title;
+  const body = document.getElementById('render-modal-body'); body.innerHTML = ''; body.appendChild(contentEl);
+  const act = document.getElementById('render-modal-actions'); act.innerHTML = '';
+  actions.forEach(a => { const b = document.createElement('button'); b.className = 'hb-btn'; b.textContent = a.label; b.addEventListener('click', a.onClick); act.appendChild(b); });
+  modal.style.display = 'flex';
+}
+function hideRenderModal() { document.getElementById('render-modal').style.display = 'none'; }
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// ── 2D camera → PNG image ──
+function renderCameraImage(e) {
+  applyCameraParams(e); e.threeCam.updateMatrixWorld(true);
+  const w = Math.max(1, Math.round(e.resX)), h = Math.max(1, Math.round(e.resY));
+  // Render to an offscreen target at the requested resolution
+  const target = new THREE.WebGLRenderTarget(w, h, { samples: 4 });
+  const prevHelperVis = cameras.map(c => c.helper.visible);
+  cameras.forEach(c => c.helper.visible = false);      // don't capture frustum gizmos
+  const tfWasVisible = tfCtrl.visible; tfCtrl.visible = false;
+  renderer.setRenderTarget(target);
+  renderer.render(scene, e.threeCam);
+  const buf = new Uint8Array(w * h * 4);
+  renderer.readRenderTargetPixels(target, 0, 0, w, h, buf);
+  renderer.setRenderTarget(null);
+  cameras.forEach((c, i) => c.helper.visible = prevHelperVis[i]); tfCtrl.visible = tfWasVisible;
+  target.dispose();
+  // Flip vertically into a 2D canvas (WebGL origin is bottom-left)
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d'); const img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) {
+    const sy = (h - 1 - y);
+    for (let x = 0; x < w; x++) {
+      const d = (y * w + x) * 4, s = (sy * w + x) * 4;
+      img.data[d] = buf[s]; img.data[d+1] = buf[s+1]; img.data[d+2] = buf[s+2]; img.data[d+3] = buf[s+3];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  showRenderModal(`${e.name} — ${w}×${h}`, cv, [
+    { label: 'Download PNG', onClick: () => cv.toBlob(b => downloadBlob(b, e.name.replace(/\s+/g,'_') + '.png'), 'image/png') },
+    { label: 'Close', onClick: hideRenderModal },
+  ]);
+}
+
+// ── 3D camera → point cloud (rays in the frustum pyramid) ──
+function renderPointCloud(e) {
+  applyCameraParams(e); e.threeCam.updateMatrixWorld(true);
+  const cam = e.threeCam;
+  const nx = Math.max(1, Math.round(e.resX)), ny = Math.max(1, Math.round(e.resY));
+  const near = Math.max(0, e.clearance || 0);          // ignore hits closer than this
+  const far  = Math.max(near + 1, e.scanDistance || 1000);
+  const meshes = []; objects.forEach(o => { if (o.visible !== false) o.meshChildren.forEach(({ mesh }) => { if (mesh.visible) meshes.push(mesh); }); });
+  const ray = new THREE.Raycaster(); ray.near = near; ray.far = far;
+  const origin = new THREE.Vector3(); cam.getWorldPosition(origin);
+  const pts = [];      // {x,y,z, r,g,b}
+  const mode = e.pointMode;
+  const clamp255 = n => Math.max(0, Math.min(255, Math.round(n)));
+  // Project a grid of NDC points through the camera; each defines a ray direction.
+  for (let iy = 0; iy < ny; iy++) {
+    const ndcY = ny === 1 ? 0 : (iy / (ny - 1)) * 2 - 1;
+    for (let ix = 0; ix < nx; ix++) {
+      const ndcX = nx === 1 ? 0 : (ix / (nx - 1)) * 2 - 1;
+      ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), cam);
+      const hits = ray.intersectObjects(meshes, false).filter(h => h.distance >= near && h.distance <= far);
+      if (!hits.length) continue;
+      const take = (mode === 'all') ? hits : [hits[0]];   // first-hit honors occlusion (shadowing)
+      take.forEach(hit => {
+        const pt = hit.point;
+        if (!isFinite(pt.x) || !isFinite(pt.y) || !isFinite(pt.z)) return;
+        let r = 200, g = 200, b = 200;
+        if (mode === 'first-color' && hit.object.material && hit.object.material.color) {
+          const c = hit.object.material.color; r = clamp255(c.r*255); g = clamp255(c.g*255); b = clamp255(c.b*255);
+        }
+        pts.push({ x: pt.x, y: pt.y, z: pt.z, r, g, b });
+      });
+    }
+  }
+  // Build a small preview canvas (top-down scatter) + export buttons
+  const info = document.createElement('div');
+  info.style.cssText = 'display:flex;flex-direction:column;gap:8px;align-items:center;color:var(--b8);font-size:12px';
+  const stat = document.createElement('div');
+  stat.textContent = `${pts.length.toLocaleString()} points captured (${nx}×${ny} rays, ${mode}, range ${near}–${far} mm)`;
+  const cv = document.createElement('canvas'); cv.width = 360; cv.height = 240; cv.style.background = '#111';
+  drawCloudPreview(cv, pts);
+  info.appendChild(stat); info.appendChild(cv);
+  if (!pts.length) stat.textContent = 'No points captured — check camera aim, clearance/scan distance, and that objects are in view.';
+  showRenderModal(`${e.name} — point cloud`, info, [
+    { label: 'Download PLY', onClick: () => downloadBlob(new Blob([cloudToPLY(pts)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.ply') },
+    { label: 'Download PCD', onClick: () => downloadBlob(new Blob([cloudToPCD(pts)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.pcd') },
+    { label: 'Download XYZ', onClick: () => downloadBlob(new Blob([cloudToXYZ(pts)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.xyz') },
+    { label: 'Close', onClick: hideRenderModal },
+  ]);
+}
+
+function drawCloudPreview(cv, pts) {
+  const ctx = cv.getContext('2d'); ctx.clearRect(0,0,cv.width,cv.height);
+  if (!pts.length) return;
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  pts.forEach(p => { if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y; });
+  const sx = (cv.width-20)/Math.max(maxX-minX,1e-6), sy = (cv.height-20)/Math.max(maxY-minY,1e-6), s = Math.min(sx,sy);
+  pts.forEach(p => {
+    const px = 10 + (p.x-minX)*s, py = cv.height - (10 + (p.y-minY)*s);
+    ctx.fillStyle = `rgb(${p.r},${p.g},${p.b})`; ctx.fillRect(px, py, 1.5, 1.5);
+  });
+}
+function cloudToXYZ(pts) {
+  return pts.map(p => `${(+p.x).toFixed(4)} ${(+p.y).toFixed(4)} ${(+p.z).toFixed(4)} ${p.r|0} ${p.g|0} ${p.b|0}`).join('\n') + '\n';
+}
+function cloudToPLY(pts) {
+  const head = `ply\nformat ascii 1.0\ncomment Generated by Scene Builder\nelement vertex ${pts.length}\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n`;
+  const body = pts.map(p => `${(+p.x).toFixed(4)} ${(+p.y).toFixed(4)} ${(+p.z).toFixed(4)} ${p.r|0} ${p.g|0} ${p.b|0}`).join('\n');
+  return head + body + '\n';
+}
+function cloudToPCD(pts) {
+  const head = `# .PCD v0.7 - Point Cloud Data file format\nVERSION 0.7\nFIELDS x y z rgb\nSIZE 4 4 4 4\nTYPE F F F U\nCOUNT 1 1 1 1\nWIDTH ${pts.length}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS ${pts.length}\nDATA ascii\n`;
+  return head + pts.map(p => { const rgb = (((p.r|0)<<16)|((p.g|0)<<8)|(p.b|0))>>>0; return `${(+p.x).toFixed(4)} ${(+p.y).toFixed(4)} ${(+p.z).toFixed(4)} ${rgb}`; }).join('\n') + '\n';
+}
+
 // ── GRID + AXES ───────────────────────────────────────────────────────────────
 const grid = new THREE.GridHelper(5000, 100, 0x303040, 0x222028);
 grid.rotation.x = Math.PI / 2; scene.add(grid);
@@ -237,8 +689,10 @@ new ResizeObserver(resize).observe(wrap); resize();
 // because JS closures capture variables by reference, not value.
 function animate() {
   requestAnimationFrame(animate);
-  orbit.update();
-  renderer.render(scene, usingRenderCam ? renderCam : activeCam);
+  if (!shownCamera) orbit.update();
+  const cam = shownCamera ? shownCamera.threeCam : (usingRenderCam ? renderCam : activeCam);
+  if (shownCamera) shownCamera.threeCam.updateMatrixWorld(true);
+  renderer.render(scene, cam);
   updateMeasLabels();
 }
 // ── FIT ───────────────────────────────────────────────────────────────────────
@@ -378,7 +832,7 @@ function applyHighlight(obj, on) {
   obj.meshChildren.forEach(({ mesh }) => mesh.material.emissive && mesh.material.emissive.setHex(hex));
 }
 function setSelected(obj) {
-  if (obj) { detachHandleGizmo(); selectedLight = null; selectedMeas = null; }
+  if (obj) { detachHandleGizmo(); selectedLight = null; selectedMeas = null; selectedCamera = null; }
   clearAllHighlights();
   tfCtrl.detach();
   selected = obj;
@@ -427,6 +881,7 @@ function setMode(m) {
   measPts = []; angMeasPts = []; updateMeasHandleVis();
 }
 function setGizmo(m) {
+  gizmoMode = m;
   tfCtrl.setMode(m);
   document.querySelectorAll('.tool-btn[data-gizmo]').forEach(b => b.classList.toggle('active', b.dataset.gizmo === m));
 }
@@ -469,6 +924,13 @@ renderer.domElement.addEventListener('pointerdown', e => {
       let node = lpHits[0].object, lite = null;
       while (node && !lite) { lite = dirLights.find(l => l.pivot === node); node = node.parent; }
       if (lite) { selectLight(lite); return; }
+    }
+    // Camera bodies
+    const visCamBodies = cameras.filter(c => c.visible && c.gizmoVisible !== false).map(c => c.body);
+    const cbHits = visCamBodies.length ? raycaster.intersectObjects(visCamBodies, false) : [];
+    if (cbHits.length) {
+      const cam = cameras.find(c => c.body === cbHits[0].object);
+      if (cam) { selectCamera(cam); return; }
     }
     const hits = raycaster.intersectObjects(allM, false);
     if (hits.length) { const obj = objects.find(o => o.meshChildren.some(mc => mc.mesh === hits[0].object)); if (obj) e.shiftKey ? toggleMultiSel(obj) : setSelected(obj); }
@@ -629,8 +1091,13 @@ function refreshPropsTab() { showPropertiesForSelection(); }
 
 // Contextual properties dispatcher: shows the right pane for current selection
 function showPropertiesForSelection() {
-  const panes = ['props-empty','props-object','props-light','props-annot'];
+  const panes = ['props-empty','props-object','props-light','props-annot','props-camera'];
   const hideAll = () => panes.forEach(p => { const el = document.getElementById(p); if (el) el.style.display = 'none'; });
+  if (selectedCamera) {
+    hideAll(); document.getElementById('props-camera').style.display = '';
+    showCameraProperties(selectedCamera);
+    return;
+  }
   if (selected) {
     hideAll(); document.getElementById('props-object').style.display = '';
     refreshTfUI();
@@ -680,9 +1147,10 @@ function refreshOutliner() {
       if (k === 'obj') removeObjectFromGroup(id);
       else if (k === 'light') removeLightFromGroup(id);
       else if (k === 'meas') removeMeasFromGroup(id);
+      else if (k === 'cam') removeCameraFromGroup(id);
     });
   }
-  if (!objects.length && !dirLights.length && !measurements.length) {
+  if (!objects.length && !dirLights.length && !measurements.length && !cameras.length) {
     el.innerHTML = '<span class="hint">Empty scene — use the Add menu to add lights or primitives, or import a file.</span>';
     updateStatus(); return;
   }
@@ -802,6 +1270,34 @@ function refreshOutliner() {
     });
   }
 
+  // ── Cameras (with grouping) ──
+  camGroups.forEach(cg => {
+    const anyGizmo = cg.members.some(c => c.gizmoVisible !== false);
+    mkRow({
+      icon: '🎥', name: cg.name, sel: false, vis: cg.visible, renameTarget: cg,
+      expanded: cg._expanded,
+      gizmoBtn: { on: anyGizmo, onClick: () => { const off = anyGizmo; cg.members.forEach(c => { c.gizmoVisible = !off; updateCameraMarker(c); }); refreshOutliner(); } },
+      onExpand: () => { cg._expanded = !cg._expanded; refreshOutliner(); },
+      onClick: () => { cg._expanded = !cg._expanded; refreshOutliner(); },
+      onVis: () => { cg.visible = !cg.visible; cg.members.forEach(c => { c.visible = cg.visible; updateCameraMarker(c); }); refreshOutliner(); },
+      dropAccept: tok => { const [k,i] = tok.split(':'); if (k === 'cam') addCameraToGroup(parseInt(i,10), cg); },
+    });
+    if (cg._expanded) cg.members.forEach(c => camRow(c, true));
+  });
+  cameras.filter(c => !c._group).forEach(c => camRow(c, false));
+
+  function camRow(c, indent) {
+    mkRow({
+      icon: c.kind === '3d' ? '📷' : '🎥', name: c.name,
+      sel: selectedCamera === c, multi: camMultiSel.has(c.id) && selectedCamera !== c,
+      indent, vis: c.visible, renameTarget: c,
+      gizmoBtn: { on: c.gizmoVisible !== false, onClick: () => { c.gizmoVisible = c.gizmoVisible === false ? true : false; updateCameraMarker(c); refreshOutliner(); } },
+      onClick: e => { if (e.shiftKey) toggleCamMultiSel(c); else selectCamera(c); },
+      onVis: () => { c.visible = !c.visible; updateCameraMarker(c); refreshOutliner(); },
+      dragData: 'cam:' + c.id,
+    });
+  }
+
   updateStatus();
 }
 
@@ -812,7 +1308,7 @@ function setMeasVisible(m, vis) {
 }
 
 function selectMeas(m) {
-  setSelected(null); selectedLight = null; selectedMeas = m;
+  setSelected(null); selectedLight = null; selectedCamera = null; selectedMeas = m;
   detachHandleGizmo();
   showAnnotProperties(m);
   updateMeasHandleVis();   // show this annotation's handles even in select mode
@@ -938,6 +1434,7 @@ document.getElementById('btn-group').addEventListener('click', () => {
   const objG = objects.filter(o => multiSel.has(o.id));
   const litG = dirLights.filter(l => lightMultiSel.has(l.id) && !l._group);
   const meaG = measurements.filter(m => measMultiSel.has(m.id) && !m._group);
+  const camG = cameras.filter(c => camMultiSel.has(c.id) && !c._group);
 
   if (objG.length >= 2) {
     const name = prompt('Group name:', 'Group') || 'Group';
@@ -956,8 +1453,13 @@ document.getElementById('btn-group').addEventListener('click', () => {
     const mg = { id: 'mg' + (groupId++), name, members: meaG, visible: true, _expanded: true };
     meaG.forEach(m => m._group = mg);
     measGroups.push(mg); measMultiSel.clear();
+  } else if (camG.length >= 2) {
+    const name = prompt('Camera group name:', 'Camera Group') || 'Camera Group';
+    const cg = { id: 'cg' + (groupId++), name, members: camG, visible: true, _expanded: true };
+    camG.forEach(c => c._group = cg);
+    camGroups.push(cg); camMultiSel.clear();
   } else {
-    alert('Shift+click ≥2 items of the same kind (objects, lights, or annotations) to group them.');
+    alert('Shift+click ≥2 items of the same kind (objects, lights, annotations, or cameras) to group them.');
     return;
   }
   refreshOutliner(); updateStatus();
@@ -976,6 +1478,11 @@ document.getElementById('btn-ungroup').addEventListener('click', () => {
   if (selectedLight && selectedLight._group) {
     const lg = selectedLight._group; lg.members.forEach(l => l._group = null);
     lightGroups = lightGroups.filter(g => g !== lg); refreshOutliner(); return;
+  }
+  // Camera group?
+  if (selectedCamera && selectedCamera._group) {
+    const cg = selectedCamera._group; cg.members.forEach(c => c._group = null);
+    camGroups = camGroups.filter(g => g !== cg); refreshOutliner(); return;
   }
   // Annotation group?
   if (selectedMeas && selectedMeas._group) {
@@ -1072,14 +1579,14 @@ function removeMeas(id) {
 }
 function rebuildMeas(entry) {
   entry.dist = entry.p1.distanceTo(entry.p2);
-  if (!entry._labelOverride) entry.label = `${entry.dist.toFixed(2)} mm`;
+  entry.label = entry._labelOverride || `${entry.dist.toFixed(2)} mm`;
   buildArrow(entry); buildLabel(entry);
   entry.group3d.visible = entry.visible !== false;
   updateMeasHandleVis();
 }
 function rebuildMeasKeepGizmo(entry, hi) {
   entry.dist = entry.p1.distanceTo(entry.p2);
-  if (!entry._labelOverride) entry.label = `${entry.dist.toFixed(2)} mm`;
+  entry.label = entry._labelOverride || `${entry.dist.toFixed(2)} mm`;
   buildArrow(entry); buildLabel(entry);
   entry.group3d.visible = entry.visible !== false;
   if (gizmoHandle && gizmoHandleMeas === entry && entry.handles[hi]) {
@@ -1217,8 +1724,7 @@ function rebuildAngle(entry) {
   const v1 = new THREE.Vector3().subVectors(entry.p1, entry.apex).normalize();
   const v2 = new THREE.Vector3().subVectors(entry.p2, entry.apex).normalize();
   entry.angleDeg = THREE.MathUtils.radToDeg(Math.acos(Math.max(-1, Math.min(1, v1.dot(v2)))));
-  const over = entry._labelOverride;
-  if (!over) entry.label = `${entry.angleDeg.toFixed(2)}°`;
+  entry.label = entry._labelOverride || `${entry.angleDeg.toFixed(2)}°`;
   buildAngle(entry); buildAngleLabel(entry);
   entry.group3d.visible = entry.visible !== false;
   updateMeasHandleVis();
@@ -1233,7 +1739,7 @@ function updateMeasHandleVis() {
   });
 }
 function updateMeasLabels() {
-  const rect = wrap.getBoundingClientRect(), cam = usingRenderCam ? renderCam : activeCam;
+  const rect = wrap.getBoundingClientRect(), cam = shownCamera ? shownCamera.threeCam : (usingRenderCam ? renderCam : activeCam);
   measurements.forEach(m => { if (!m.labelEl || !m.mid) return; if (m.visible === false) { m.labelEl.style.display='none'; return; } const v = m.mid.clone().project(cam); m.labelEl.style.left = ((v.x * .5 + .5) * rect.width) + 'px'; m.labelEl.style.top = ((-v.y * .5 + .5) * rect.height) + 'px'; });
 }
 function refreshMeasList() {
@@ -1384,7 +1890,12 @@ function saveScene() {
     measurements: measurements.map(m => m.type==='angle' ? { type:'angle', name:m.name, label:m.label, labelOverride:m._labelOverride, angleDeg:m.angleDeg, p1:m.p1.toArray(), apex:m.apex.toArray(), p2:m.p2.toArray(), style:m.style, visible:m.visible } : { label:m.label, name:m.name, labelOverride:m._labelOverride, dist:m.dist, p1:m.p1.toArray(), p2:m.p2.toArray(), style:m.style, visible:m.visible }),
     lights: { ambient: { intensity:ambLight.intensity, sky:'#'+ambLight.color.getHexString(), ground:'#'+ambLight.groundColor.getHexString() }, directional: dirLights.map(l => ({ name:l.name, intensity:l.light.intensity, color:'#'+l.light.color.getHexString(), pos:l.light.position.toArray(), target:l.target.position.toArray(), visible:l.visible, gizmoVisible:l.gizmoVisible })) },
     lightGroups: lightGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(l => dirLights.indexOf(l)) })),
-    measGroups:  measGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(m => measurements.indexOf(m)) })) };
+    measGroups:  measGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(m => measurements.indexOf(m)) })),
+    cameras: cameras.map(c => ({ kind:c.kind, name:c.name, visible:c.visible, gizmoVisible:c.gizmoVisible,
+      pos:c.pivot.position.toArray(), quat:c.pivot.quaternion.toArray(),
+      resX:c.resX, resY:c.resY, projection:c.projection, focalMode:c.focalMode, focalLength:c.focalLength,
+      fov:c.fov, orthoHeight:c.orthoHeight, clearance:c.clearance, fovMode:c.fovMode, fov3d:c.fov3d, fov3dMm:c.fov3dMm, pointMode:c.pointMode })),
+    camGroups: camGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(c => cameras.indexOf(c)) })) };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'scene.cadscene'; a.click();
 }
@@ -1394,9 +1905,13 @@ document.getElementById('fi-scene').addEventListener('change', async e => {
     const data = JSON.parse(await file.text());
     objects.forEach(o => scene.remove(o.group)); measurements.forEach(m => { scene.remove(m.group3d); m.labelEl?.remove(); });
     dirLights.forEach(l => [l.light,l.target,l.pivot,l.line,l.helper].forEach(x => scene.remove(x)));
+    if (shownCamera) exitCameraView();
+    cameras.forEach(c => { scene.remove(c.pivot); scene.remove(c.helper); c.helper.dispose?.(); });
     objects = []; measurements = []; dirLights = []; lightGroups = []; measGroups = [];
-    selected = null; selectedLight = null; selectedMeas = null;
-    multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set();
+    cameras = []; camGroups = [];
+    selected = null; selectedLight = null; selectedMeas = null; selectedCamera = null;
+    multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set(); camMultiSel = new Set();
+    cameraId = 1;
     if (data.bg) { scene.background = new THREE.Color(data.bg); document.getElementById('bg-color').value = data.bg; document.getElementById('csp-bg').style.background = data.bg; }
     function lm(grp, defs) { const mc = []; (defs||[]).forEach(md => { const mesh = mkMesh(new Float32Array(md.positions), md.normals?new Float32Array(md.normals):null, md.indices?new Uint32Array(md.indices):null, new THREE.Color(md.color)); mesh.userData.partName = md.partName; mesh.material.metalness = md.metalness??0.6; mesh.material.roughness = md.roughness??0.3; grp.add(mesh); mc.push({ mesh, originalColor: new THREE.Color(md.color), partName: md.partName }); }); return mc; }
     data.objects?.forEach(od => { const grp = new THREE.Group(); grp.position.fromArray(od.position); grp.rotation.set(...od.rotation); grp.scale.fromArray(od.scale); if (od.isGroup&&od.children?.length) { const ch=[]; od.children.forEach(cd=>{const cg=new THREE.Group();cg.position.fromArray(cd.position);cg.rotation.set(...cd.rotation);cg.scale.fromArray(cd.scale);const cmc=lm(cg,cd.meshes);grp.add(cg);ch.push({id:nextId++,name:cd.name,group:cg,visible:true,meshChildren:cmc,isGroup:false,childIds:[],_children:[],_expanded:false});}); const allMC=ch.flatMap(c=>c.meshChildren); scene.add(grp); objects.push({id:nextId++,name:od.name,group:grp,visible:true,meshChildren:allMC,isGroup:true,childIds:ch.map(c=>c.id),_children:ch,_expanded:false}); } else { const mc=lm(grp,od.meshes); scene.add(grp); objects.push({id:nextId++,name:od.name,group:grp,visible:true,meshChildren:mc,isGroup:false,childIds:[],_children:[],_expanded:false}); } });
@@ -1416,6 +1931,19 @@ document.getElementById('fi-scene').addEventListener('change', async e => {
     data.lightGroups?.forEach(g => { const members = (g.members||[]).map(i => dirLights[i]).filter(Boolean); if (members.length) { const lg = { id:'lg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(l => l._group = lg); lightGroups.push(lg); } });
     // Restore measurement groups
     data.measGroups?.forEach(g => { const members = (g.members||[]).map(i => measurements[i]).filter(Boolean); if (members.length) { const mg = { id:'mg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(m => m._group = mg); measGroups.push(mg); } });
+    // Restore cameras
+    data.cameras?.forEach(cd => {
+      const e = makeCamera(cd.kind, cd, false);
+      if (cd.name) e.name = cd.name;
+      if (cd.pos) e.pivot.position.fromArray(cd.pos);
+      if (cd.quat) e.pivot.quaternion.fromArray(cd.quat);
+      e.pivot.updateMatrixWorld(true);
+      if (cd.visible === false) e.visible = false;
+      if (cd.gizmoVisible === false) e.gizmoVisible = false;
+      applyCameraParams(e); updateCameraMarker(e);
+    });
+    // Restore camera groups
+    data.camGroups?.forEach(g => { const members = (g.members||[]).map(i => cameras[i]).filter(Boolean); if (members.length) { const cg = { id:'cg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(c => c._group = cg); camGroups.push(cg); } });
     tfCtrl.detach(); showPropertiesForSelection();
     updateShadowCameras();
     refreshOutliner(); updateStatus();
@@ -1476,6 +2004,7 @@ window.addEventListener('keydown', e => {
   if (c==='NumpadDecimal'){if(selected)fitToView(selected.group);else fitAll();e.preventDefault();}
   if (c==='NumpadDivide'){e.preventDefault();if(!selected)return;if(!localViewActive){localViewHidden=objects.filter(o=>o!==selected).map(o=>{o.group.visible=false;return o;});localViewActive=true;setVP('Local');}else{localViewHidden.forEach(o=>{o.group.visible=o.visible;});localViewHidden=[];localViewActive=false;setVP(isOrtho?'Orthographic':'Perspective');}}
 });
+window.addEventListener('keydown', e => { if (e.key === 'Escape') { if (document.getElementById('render-modal').style.display === 'flex') hideRenderModal(); else if (shownCamera) exitCameraView(); } });
 window.addEventListener('keyup', e => {
   if (e.key === 'Control') { tfCtrl.setTranslationSnap(null); tfCtrl.setRotationSnap(null); tfCtrl.setScaleSnap(null); document.getElementById('snap-label').style.display = 'none'; }
 });
@@ -1519,22 +2048,24 @@ function addPrimitive(kind) {
 
 // ── NEW SCENE ─────────────────────────────────────────────────────────────────
 function newScene() {
-  if (objects.length || dirLights.length || measurements.length) {
+  if (objects.length || dirLights.length || measurements.length || cameras.length) {
     if (!confirm('Start a new scene? All unsaved changes will be lost.')) return;
   }
+  if (shownCamera) exitCameraView();
   objects.forEach(o => scene.remove(o.group));
   measurements.forEach(m => { scene.remove(m.group3d); m.labelEl?.remove(); });
   dirLights.forEach(l => [l.light, l.target, l.pivot, l.line, l.helper].forEach(x => scene.remove(x)));
-  objects = []; measurements = []; dirLights = [];
-  lightGroups = []; measGroups = [];
-  selected = null; selectedLight = null; selectedMeas = null;
-  multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set();
+  cameras.forEach(c => { scene.remove(c.pivot); scene.remove(c.helper); c.helper.dispose?.(); });
+  objects = []; measurements = []; dirLights = []; cameras = [];
+  lightGroups = []; measGroups = []; camGroups = [];
+  selected = null; selectedLight = null; selectedMeas = null; selectedCamera = null;
+  multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set(); camMultiSel = new Set();
   measPts = []; angMeasPts = [];
   detachHandleGizmo(); tfCtrl.detach();
   scene.background = new THREE.Color(0x1b1b1b);
   document.getElementById('bg-color').value = '#1b1b1b';
   document.getElementById('csp-bg').style.background = '#1b1b1b';
-  nextId = 1; measNextId = 1; lightId = 1; groupId = 1;
+  nextId = 1; measNextId = 1; lightId = 1; cameraId = 1; groupId = 1;
   makeDirLight(undefined, undefined, undefined, undefined, false); // seed one light, no auto-select
   setSelected(null); showPropertiesForSelection();
   refreshOutliner(); updateStatus();
@@ -1554,6 +2085,8 @@ mc('mi-add-cylinder', () => addPrimitive('cylinder'));
 mc('mi-add-plane',    () => addPrimitive('plane'));
 mc('mi-add-cone',     () => addPrimitive('cone'));
 mc('mi-add-torus',    () => addPrimitive('torus'));
+mc('mi-add-cam2d',    () => makeCamera('2d'));
+mc('mi-add-cam3d',    () => makeCamera('3d'));
 mc('mi-save', saveScene);
 mc('mi-open', () => document.getElementById('fi-scene').click());
 mc('mi-imp-step', () => document.getElementById('fi-step').click());
@@ -1667,6 +2200,18 @@ function initSwatches(root = document) {
 {
   const st = document.getElementById('shadow-toggle');
   if (st) st.addEventListener('change', () => setShadowsEnabled(st.checked));
+}
+
+// Camera view bar + render modal wiring
+{
+  const exitBtn = document.getElementById('cam-view-exit');
+  if (exitBtn) exitBtn.addEventListener('click', () => exitCameraView());
+  const renderBtn = document.getElementById('cam-view-render');
+  if (renderBtn) renderBtn.addEventListener('click', () => { if (shownCamera) { if (shownCamera.kind === '3d') renderPointCloud(shownCamera); else renderCameraImage(shownCamera); } });
+  const closeBtn = document.getElementById('render-modal-close');
+  if (closeBtn) closeBtn.addEventListener('click', () => hideRenderModal());
+  const modal = document.getElementById('render-modal');
+  if (modal) modal.addEventListener('click', e => { if (e.target === modal) hideRenderModal(); });
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
