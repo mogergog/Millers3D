@@ -1,0 +1,2381 @@
+import * as THREE from 'three';
+import { OrbitControls }     from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { STLLoader }         from 'three/addons/loaders/STLLoader.js';
+import { GLTFLoader }        from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader }         from 'three/addons/loaders/OBJLoader.js';
+
+// ── RENDERER ─────────────────────────────────────────────────────────────────
+const wrap = document.getElementById('canvas-wrap');
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+wrap.appendChild(renderer.domElement);
+let shadowsEnabled = true;
+
+// ── SCENE ─────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1b1b);
+
+// ── CAMERAS (Z-up) ────────────────────────────────────────────────────────────
+const perspCam = new THREE.PerspectiveCamera(45, 1, 0.001, 1e8);
+const orthoCam  = new THREE.OrthographicCamera(-500, 500, 500, -500, 0.001, 1e8);
+const renderCam = new THREE.PerspectiveCamera(45, 1, 0.001, 1e8);
+perspCam.position.set(600, -600, 400); perspCam.up.set(0, 0, 1); perspCam.lookAt(0, 0, 0);
+orthoCam.position.copy(perspCam.position); orthoCam.up.set(0, 0, 1);
+renderCam.position.set(300, -800, 300); renderCam.up.set(0, 0, 1); renderCam.lookAt(0, 0, 0);
+let activeCam = perspCam, isOrtho = false, usingRenderCam = false;
+let gizmoMode = 'translate';   // current transform gizmo mode (translate/rotate/scale)
+// Replace a panel-body node with a clone to drop any previously-attached listeners
+// (prevents stale closures from older selections firing on the reused element).
+function freshPanelBody(idStr) { const old = document.getElementById(idStr); const f = old.cloneNode(false); old.parentNode.replaceChild(f, old); return f; }
+let localViewActive = false, localViewHidden = [];
+
+function setOrthoFrustum() {
+  const d = orthoCam.position.distanceTo(orbit.target);
+  const a = Math.max(wrap.clientWidth, 1) / Math.max(wrap.clientHeight, 1);
+  const s = Math.max(1, d * .5);
+  orthoCam.left = -s*a; orthoCam.right = s*a; orthoCam.top = s; orthoCam.bottom = -s;
+  // Fit near/far to the whole scene so nothing gets clipped while orbiting in ortho.
+  // We measure scene extent along the camera's view direction from the camera origin.
+  const box = new THREE.Box3();
+  objects.forEach(o => { if (o.visible !== false) box.expandByObject(o.group); });
+  let near, far;
+  if (box.isEmpty()) {
+    near = -1e6; far = 1e6;
+  } else {
+    const dir = new THREE.Vector3(); orthoCam.getWorldDirection(dir);
+    const camPos = orthoCam.position;
+    // Project all 8 box corners onto the view axis; near/far bracket them with margin.
+    const min = box.min, max = box.max; let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const corner = new THREE.Vector3(i&1?max.x:min.x, i&2?max.y:min.y, i&4?max.z:min.z);
+      const t = corner.sub(camPos).dot(dir);
+      if (t < lo) lo = t; if (t > hi) hi = t;
+    }
+    const margin = Math.max((hi - lo) * 0.5, d, 100);
+    near = lo - margin; far = hi + margin;
+    // Ortho cameras allow negative near; keep a sane minimum span
+    if (far - near < 1) far = near + 1;
+  }
+  orthoCam.near = near; orthoCam.far = far;
+  orthoCam.updateProjectionMatrix();
+}
+function switchCam(ortho, name) {
+  if (ortho && !isOrtho) { orthoCam.position.copy(perspCam.position); orthoCam.quaternion.copy(perspCam.quaternion); orthoCam.up.copy(perspCam.up); }
+  usingRenderCam = false; isOrtho = ortho; activeCam = ortho ? orthoCam : perspCam;
+  orbit.object = activeCam; orbit.enabled = true; tfCtrl.camera = activeCam;
+  if (ortho) setOrthoFrustum(); orbit.update();
+  setVP(name || (ortho ? 'Orthographic' : 'Perspective'));
+  document.getElementById('btn-persp').classList.toggle('active', !ortho);
+  document.getElementById('btn-ortho').classList.toggle('active', ortho);
+}
+
+// ── ORBIT & TRANSFORM CONTROLS ────────────────────────────────────────────────
+const orbit = new OrbitControls(perspCam, renderer.domElement);
+orbit.enableDamping = true; orbit.dampingFactor = .08; orbit.screenSpacePanning = true;
+orbit.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+orbit.addEventListener('change', () => { if (isOrtho && !usingRenderCam) setOrthoFrustum(); });
+
+const tfCtrl = new TransformControls(perspCam, renderer.domElement);
+scene.add(tfCtrl);
+tfCtrl.addEventListener('dragging-changed', e => { orbit.enabled = !e.value; });
+tfCtrl.addEventListener('objectChange', () => {
+  refreshTfUI();
+  if (selected && tfCtrl.object === selected.group) updateShadowCameras();
+  dirLights.forEach(l => { if (l.pivot === tfCtrl.object) syncLightFromPivot(l); });
+  // Camera moved via gizmo -> sync helper + live position fields
+  cameras.forEach(c => { if (c.pivot === tfCtrl.object) {
+    c.helper.update();
+    if (selectedCamera === c) {
+      const body = document.getElementById('cam-prop-body');
+      const setF = (cls, val) => { const inp = body?.querySelector(`.${cls} .dn-input`); if (inp && document.activeElement !== inp) { inp.value = (+val).toFixed(2); const dn = inp.closest('.dn'); const mn = parseFloat(dn.dataset.min), mx = parseFloat(dn.dataset.max), tr = dn.querySelector('.dn-track'); if (tr) tr.style.width = Math.max(0, Math.min(100, (val - mn)/(mx - mn)*100)) + '%'; } };
+      setF('cam-px', c.pivot.position.x); setF('cam-py', c.pivot.position.y); setF('cam-pz', c.pivot.position.z);
+      setF('cam-rx', THREE.MathUtils.radToDeg(c.pivot.rotation.x));
+      setF('cam-ry', THREE.MathUtils.radToDeg(c.pivot.rotation.y));
+      setF('cam-rz', THREE.MathUtils.radToDeg(c.pivot.rotation.z));
+    }
+  }});
+  // Measurement handle moved via gizmo -> update the underlying point
+  if (gizmoHandle && gizmoHandleMeas && tfCtrl.object === gizmoHandle) {
+    const m = gizmoHandleMeas, pt = gizmoHandle.position.clone(), hi = m.handles.indexOf(gizmoHandle);
+    if (m.type === 'angle') {
+      if (hi === 0) m.p1.copy(pt); else if (hi === 1) m.apex.copy(pt); else if (hi === 2) m.p2.copy(pt);
+      rebuildAngleKeepGizmo(m, hi);
+    } else {
+      if (hi === 0) m.p1.copy(pt); else m.p2.copy(pt);
+      m.dist = m.p1.distanceTo(m.p2);
+      rebuildMeasKeepGizmo(m, hi);
+    }
+  }
+});
+
+// ── LIGHTS ────────────────────────────────────────────────────────────────────
+const ambLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
+scene.add(ambLight);
+
+let dirLights = [], lightId = 1;
+
+function makeDirLight(pos = [10, 10, 20], tgt = [0, 0, 0], col = '#ffffff', intensity = 2.0, selectAfter = true) {
+  const light = new THREE.DirectionalLight(new THREE.Color(col), intensity);
+  light.position.set(...pos); light.castShadow = shadowsEnabled;
+  // Reasonable default shadow camera; refined by updateShadowCameras() to fit the scene
+  light.shadow.mapSize.set(2048, 2048);
+  light.shadow.camera.near = 1; light.shadow.camera.far = 5000;
+  light.shadow.camera.left = -500; light.shadow.camera.right = 500;
+  light.shadow.camera.top = 500; light.shadow.camera.bottom = -500;
+  light.shadow.bias = -0.0003; light.shadow.normalBias = 0.5;
+  const target = new THREE.Object3D(); target.position.set(...tgt);
+  light.target = target; scene.add(light); scene.add(target); target.updateMatrixWorld();
+
+  const pivot = new THREE.Group(); pivot.position.set(...pos); scene.add(pivot);
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(3, 10, 7), new THREE.MeshBasicMaterial({ color: 0xffee88 }));
+  sphere.castShadow = false; sphere.receiveShadow = false;
+  pivot.add(sphere);
+
+  const lGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const line = new THREE.Line(lGeo, new THREE.LineBasicMaterial({ color: 0xffee88, opacity: .5, transparent: true }));
+  scene.add(line);
+  const helper = new THREE.DirectionalLightHelper(light, 15, 0xffee88); scene.add(helper);
+
+  const id = lightId++;
+  // marker = always-on visual (sphere+line+helper); .visible = scene on/off
+  const entry = { id, name: 'Dir Light ' + id, light, target, pivot, line, helper, visible: true, gizmoVisible: true, col, intensity };
+  dirLights.push(entry);
+  updateLightMarker(entry);
+  updateShadowCameras();
+  refreshOutliner();
+  if (selectAfter) selectLight(entry);
+  return entry;
+}
+
+function updateLightMarker(e) {
+  const lightOn = e.visible !== false;          // the light itself illuminates
+  const gizmoOn = e.gizmoVisible !== false && lightOn; // markers shown
+  e.light.visible = lightOn;
+  e.line.visible = e.helper.visible = e.pivot.visible = gizmoOn;
+  // Always keep marker geometry positioned correctly so it's right when re-shown
+  const lp = e.light.position, tp = e.target.position;
+  const pa = e.line.geometry.attributes.position;
+  pa.setXYZ(0, lp.x, lp.y, lp.z); pa.setXYZ(1, tp.x, tp.y, tp.z); pa.needsUpdate = true;
+  e.helper.update();
+  // If gizmo hidden and this light is gizmo-attached, detach it
+  if (!gizmoOn && tfCtrl.object === e.pivot) tfCtrl.detach();
+}
+function syncLightFromPivot(e) { e.light.position.copy(e.pivot.position); updateLightMarker(e); if (selectedLight === e) syncLightPropPanel(e); }
+function syncLightPropPanel(e) {
+  const root = document.getElementById('light-prop-body'); if (!root) return;
+  const p = e.light.position, t = e.target.position;
+  [['llx', p.x], ['lly', p.y], ['llz', p.z], ['ltx', t.x], ['lty', t.y], ['ltz', t.z]].forEach(([pfx, v]) => {
+    const inp = root.querySelector('#' + pfx + e.id); if (!inp) return;
+    inp.value = +v.toFixed(2);
+    const dn = inp.closest('.dn');
+    if (dn) { const mn = parseFloat(dn.dataset.min ?? 0), mx = parseFloat(dn.dataset.max ?? 100); dn.querySelector('.dn-track').style.width = Math.max(0, Math.min(100, (v - mn) / (mx - mn) * 100)) + '%'; }
+  });
+}
+
+function selectLight(e) {
+  // Deselect objects + annotations + cameras
+  setSelected(null); selectedMeas = null; selectedCamera = null; selectedLight = e;
+  detachHandleGizmo(); updateMeasHandleVis();
+  // Attach move gizmo to the light pivot only if its gizmo marker is visible
+  if (e.gizmoVisible !== false && e.visible !== false) { tfCtrl.setMode(gizmoMode); tfCtrl.attach(e.pivot); tfCtrl.enabled = true; }
+  else tfCtrl.detach();
+  showLightProperties(e);
+  refreshOutliner();
+}
+
+function showLightProperties(e) {
+  // Hide other panes, show light pane
+  document.querySelectorAll('.props-pane').forEach(p => p.style.display = 'none');
+  document.getElementById('props-light').style.display = '';
+  document.getElementById('light-prop-title').textContent = e.name;
+  const id = e.id, root = freshPanelBody('light-prop-body');
+  root.innerHTML = `
+    <div class="prop-row"><span class="prop-label">Intensity</span>
+      <div class="dn" data-min="0" data-max="10" data-step="0.05"><div class="dn-track"></div><input class="dn-input" type="text" id="lint${id}" value="${e.intensity}"></div>
+    </div>
+    <div class="prop-row"><span class="prop-label">Color</span>
+      <div class="color-swatch"><input type="color" id="lcol${id}" value="${e.col}"><div class="color-swatch-preview" style="background:${e.col}"></div></div>
+    </div>
+    <div class="subsec-lbl">Position</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="llx${id}" type="text" value="${+e.light.position.x.toFixed(2)}"></div></div>
+      <div class="ax"><span class="ax-lbl y">Y</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="lly${id}" type="text" value="${+e.light.position.y.toFixed(2)}"></div></div>
+      <div class="ax"><span class="ax-lbl z">Z</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="llz${id}" type="text" value="${+e.light.position.z.toFixed(2)}"></div></div>
+    </div>
+    <div class="subsec-lbl">Target</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="ltx${id}" type="text" value="${+e.target.position.x.toFixed(2)}"></div></div>
+      <div class="ax"><span class="ax-lbl y">Y</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="lty${id}" type="text" value="${+e.target.position.y.toFixed(2)}"></div></div>
+      <div class="ax"><span class="ax-lbl z">Z</span><div class="dn" data-min="-1000" data-max="1000" data-step="1"><div class="dn-track"></div><input class="dn-input" id="ltz${id}" type="text" value="${+e.target.position.z.toFixed(2)}"></div></div>
+    </div>
+    <button class="sm-btn danger w100" id="ldel${id}" style="margin-top:6px">Delete Light</button>`;
+  initDNs(root); initSwatches(root);
+
+  root.addEventListener('dnchange', ev => {
+    const inp = ev.target.closest('.dn')?.querySelector('.dn-input'); if (!inp) return;
+    const iid = inp.id, v = ev.detail.value;
+    if (iid === `lint${id}`) { e.light.intensity = v; e.intensity = v; }
+    else if (iid === `llx${id}`) e.light.position.x = v;
+    else if (iid === `lly${id}`) e.light.position.y = v;
+    else if (iid === `llz${id}`) e.light.position.z = v;
+    else if (iid === `ltx${id}`) e.target.position.x = v;
+    else if (iid === `lty${id}`) e.target.position.y = v;
+    else if (iid === `ltz${id}`) e.target.position.z = v;
+    e.pivot.position.copy(e.light.position); e.target.updateMatrixWorld();
+    updateLightMarker(e);
+  });
+  root.addEventListener('swchange', ev => { if (ev.detail.id === `lcol${id}`) { e.light.color.set(ev.detail.value); e.col = ev.detail.value; root.querySelector('.color-swatch-preview').style.background = ev.detail.value; } });
+  root.querySelector(`#ldel${id}`).addEventListener('click', () => { if (confirm(`Delete light "${e.name}"? This cannot be undone.`)) deleteLight(e); });
+}
+
+function deleteLight(e) {
+  if (e._group) { const g = e._group; g.members = g.members.filter(x => x !== e); if (g.members.length < 2) { g.members.forEach(x => x._group = null); lightGroups = lightGroups.filter(x => x !== g); } }
+  [e.light, e.target, e.pivot, e.line, e.helper].forEach(x => scene.remove(x));
+  dirLights = dirLights.filter(l => l !== e);
+  lightMultiSel.delete(e.id);
+  if (selectedLight === e) { selectedLight = null; tfCtrl.detach(); showPropertiesForSelection(); }
+  refreshOutliner();
+}
+
+// ══ CAMERAS ════════════════════════════════════════════════════════════════════
+// Cameras behave like scene objects: listed in the outliner, named, groupable,
+// move-gizmo when selected, marker (frustum) that can be toggled. Two kinds:
+//   '2d' → renders an image (PNG) the camera "sees"
+//   '3d' → projects a grid of rays in its frustum and captures a point cloud
+let cameras = [], cameraId = 1, selectedCamera = null;
+let camGroups = [], camMultiSel = new Set();
+let shownCamera = null;   // camera currently previewed in the viewport
+
+const FILM_GAUGE = 36;    // mm sensor width used to relate focal length <-> FOV
+
+function makeCamera(kind, opts = {}, selectAfter = true) {
+  const id = cameraId++;
+  const resX = opts.resX || (kind === '3d' ? 64 : 1920);
+  const resY = opts.resY || (kind === '3d' ? 48 : 1080);
+  const aspect = resX / resY;
+  const scan = (opts.scanDistance != null) ? opts.scanDistance : (kind === '3d' ? 1000 : 5000);
+  const threeCam = (opts.projection === 'orthographic')
+    ? new THREE.OrthographicCamera(-100, 100, 100, -100, 0.1, scan)
+    : new THREE.PerspectiveCamera(opts.fov || 50, aspect, 0.1, scan);
+  threeCam.filmGauge = FILM_GAUGE;
+  threeCam.up.set(0, 0, 1);
+
+  // Pivot group carries the camera + marker; moving/rotating the pivot moves the camera.
+  // Default: at the origin, looking straight DOWN -Z, no rotation.
+  const pivot = new THREE.Group();
+  pivot.position.set(...(opts.pos || [ (cameras.length * 40), 0, 0 ]));
+  // A camera looks down its local -Z. We want it to look down WORLD -Z with no
+  // rotation, which is the camera's natural orientation, so leave rotation = identity.
+  if (opts.rot) pivot.rotation.set(opts.rot[0], opts.rot[1], opts.rot[2]);
+  pivot.add(threeCam);
+  scene.add(pivot);
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(12, 12, 18),
+    new THREE.MeshBasicMaterial({ color: kind === '3d' ? 0x55ccff : 0xff8844 }));
+  body.castShadow = body.receiveShadow = false;
+  pivot.add(body);
+
+  const helper = new THREE.CameraHelper(threeCam);
+  scene.add(helper);
+
+  const e = {
+    id, kind, name: (kind === '3d' ? '3D Camera ' : '2D Camera ') + id,
+    threeCam, pivot, body, helper,
+    visible: true, gizmoVisible: true, _group: null,
+    resX, resY,
+    // 2D
+    projection: opts.projection || 'perspective',
+    focalMode: opts.focalMode || 'fov',
+    focalLength: opts.focalLength || 35,
+    fov: opts.fov || 50,
+    orthoHeight: opts.orthoHeight || 200,
+    // 3D + capture range (both kinds): clearance = near cutoff, scanDistance = far cutoff
+    clearance: (opts.clearance != null) ? opts.clearance : 0,   // points closer than this are ignored
+    scanDistance: scan,                                          // max capture / far plane
+    fovMode: opts.fovMode || 'angle',
+    fov3d: opts.fov3d || 50,
+    fov3dMm: opts.fov3dMm || 200,
+    pointMode: opts.pointMode || 'first-color',
+    captureNormals: opts.captureNormals || false,
+    renderBg: opts.renderBg !== false,   // 2D: include background in PNG (default true)
+  };
+  cameras.push(e);
+  applyCameraParams(e);
+  updateCameraMarker(e);
+  refreshOutliner();
+  if (selectAfter) selectCamera(e);
+  return e;
+}
+
+// Push current params into the THREE camera + helper
+function applyCameraParams(e) {
+  const cam = e.threeCam;
+  const aspect = Math.max(e.resX, 1) / Math.max(e.resY, 1);
+  const near = Math.max(0.01, e.clearance || 0.01);   // clearance = near cutoff
+  const far  = Math.max(near + 1, e.scanDistance || 5000);
+  if (e.kind === '2d' && e.projection === 'orthographic') {
+    if (!cam.isOrthographicCamera) { e.threeCam = rebuildThreeCam(e, 'orthographic'); }
+    const c = e.threeCam, h = e.orthoHeight / 2, w = h * aspect;
+    c.left = -w; c.right = w; c.top = h; c.bottom = -h; c.near = near; c.far = far;
+    c.updateProjectionMatrix();
+  } else {
+    if (!e.threeCam.isPerspectiveCamera) { e.threeCam = rebuildThreeCam(e, 'perspective'); }
+    const c = e.threeCam;
+    c.aspect = aspect;
+    if (e.kind === '3d') {
+      c.fov = (e.fovMode === 'angle') ? e.fov3d : THREE.MathUtils.radToDeg(2 * Math.atan((e.fov3dMm/2) / 100));
+    } else {
+      if (e.focalMode === 'focal') { c.setFocalLength(e.focalLength); e.fov = c.fov; }
+      else c.fov = e.fov;
+    }
+    c.near = near; c.far = far;
+    c.updateProjectionMatrix();
+  }
+  if (e.helper) { e.helper.camera = e.threeCam; e.helper.update(); }
+}
+
+// Rebuild the THREE camera when projection type changes, preserving transform
+function rebuildThreeCam(e, projection) {
+  const old = e.threeCam;
+  const aspect = Math.max(e.resX,1) / Math.max(e.resY,1);
+  const far = Math.max(1, e.scanDistance || 5000);
+  const c = (projection === 'orthographic')
+    ? new THREE.OrthographicCamera(-100,100,100,-100, 0.1, far)
+    : new THREE.PerspectiveCamera(e.fov||50, aspect, 0.1, far);
+  c.filmGauge = FILM_GAUGE; c.up.set(0,0,1);
+  c.position.copy(old.position); c.quaternion.copy(old.quaternion);
+  e.pivot.remove(old); e.pivot.add(c);
+  if (e.helper) { scene.remove(e.helper); e.helper.dispose?.(); e.helper = new THREE.CameraHelper(c); scene.add(e.helper); }
+  return c;
+}
+
+function updateCameraMarker(e) {
+  const on = e.visible !== false;
+  const gizmoOn = e.gizmoVisible !== false && on;
+  // The camera body + frustum together ARE the camera's visual marker — hiding the
+  // gizmo hides both. (The underlying view camera still works for Show/Render.)
+  e.body.visible = gizmoOn;
+  e.helper.visible = gizmoOn;
+  e.helper.update();
+  if (!gizmoOn && tfCtrl.object === e.pivot) tfCtrl.detach();
+}
+
+function selectCamera(e) {
+  setSelected(null); selectedLight = null; selectedMeas = null; selectedCamera = e;
+  detachHandleGizmo();
+  if (e.gizmoVisible !== false && e.visible !== false) { tfCtrl.setMode(gizmoMode); tfCtrl.attach(e.pivot); tfCtrl.enabled = true; }
+  else tfCtrl.detach();
+  showCameraProperties(e);
+  refreshOutliner();
+}
+
+function deleteCamera(e) {
+  if (e._group) { const g = e._group; g.members = g.members.filter(x => x !== e); if (g.members.length < 2) dissolveCamGroup(g); }
+  if (shownCamera === e) exitCameraView();
+  scene.remove(e.pivot); scene.remove(e.helper); e.helper.dispose?.();
+  cameras = cameras.filter(c => c !== e);
+  camMultiSel.delete(e.id);
+  if (selectedCamera === e) { selectedCamera = null; tfCtrl.detach(); showPropertiesForSelection(); }
+  refreshOutliner();
+}
+
+// Keep pivot/threeCam/helper in sync after gizmo move
+function syncCameraFromPivot(e) { e.helper.update(); if (shownCamera === e) {/* live view follows automatically */} }
+
+// ── Camera grouping (drag & drop, same pattern as lights) ──
+function addCameraToGroup(camId, cg) {
+  const c = cameras.find(x => x.id === camId); if (!c || !cg) return;
+  if (c._group === cg) return;
+  if (c._group) { c._group.members = c._group.members.filter(x => x !== c); if (c._group.members.length < 2) dissolveCamGroup(c._group); }
+  c._group = cg; if (!cg.members.includes(c)) cg.members.push(c);
+  cg._expanded = true; refreshOutliner();
+}
+function removeCameraFromGroup(camId) {
+  const c = cameras.find(x => x.id === camId); if (!c || !c._group) return;
+  const g = c._group; g.members = g.members.filter(x => x !== c); c._group = null;
+  if (g.members.length < 2) dissolveCamGroup(g);
+  refreshOutliner();
+}
+function dissolveCamGroup(g) { (g.members||[]).forEach(c => c._group = null); camGroups = camGroups.filter(x => x !== g); }
+function toggleCamMultiSel(c) { if (camMultiSel.has(c.id)) camMultiSel.delete(c.id); else camMultiSel.add(c.id); selectCamera(c); }
+
+// ── Show / exit camera preview ──
+function showCameraView(e) {
+  applyCameraParams(e);
+  e.threeCam.updateMatrixWorld(true);
+  shownCamera = e;
+  document.getElementById('cam-view-bar').style.display = 'flex';
+  document.getElementById('cam-view-name').textContent = '🎥 ' + e.name + ' — preview';
+}
+function exitCameraView() {
+  shownCamera = null;
+  document.getElementById('cam-view-bar').style.display = 'none';
+}
+
+// ── Camera properties panel (rendered differently from objects) ──
+function showCameraProperties(e) {
+  document.querySelectorAll('.props-pane').forEach(p => p.style.display = 'none');
+  document.getElementById('props-camera').style.display = '';
+  document.getElementById('cam-prop-icon').textContent = e.kind === '3d' ? '📷' : '🎥';
+  document.getElementById('cam-prop-title').textContent = e.name;
+  const id = e.id, root = freshPanelBody('cam-prop-body');
+  const p = e.pivot.position;
+  const dn = (cls, mn, mx, st, v) => `<div class="dn ${cls}" data-min="${mn}" data-max="${mx}" data-step="${st}" style="flex:1"><div class="dn-track"></div><input class="dn-input" type="text" value="${v}"></div>`;
+  const seg = (cls, opts, cur) => `<div class="cam-seg ${cls}">${opts.map(([v,t])=>`<button data-v="${v}" class="${cur===v?'active':''}">${t}</button>`).join('')}</div>`;
+
+  let kindFields = '';
+  if (e.kind === '2d') {
+    kindFields = `
+      <div class="cam-field"><span>Projection</span>${seg('cam-proj',[['perspective','Perspective'],['orthographic','Orthographic']], e.projection)}</div>
+      <div class="cam-field cam-lens" style="${e.projection==='orthographic'?'display:none':''}"><span>Lens by</span>${seg('cam-focalmode',[['fov','FOV°'],['focal','Focal mm']], e.focalMode)}</div>
+      <div class="cam-field cam-fov-row" style="${(e.projection==='orthographic'||e.focalMode!=='fov')?'display:none':''}"><span>FOV (°)</span>${dn('cam-fov',1,170,1,e.fov)}</div>
+      <div class="cam-field cam-focal-row" style="${(e.projection==='orthographic'||e.focalMode!=='focal')?'display:none':''}"><span>Focal (mm)</span>${dn('cam-focal',4,800,1,e.focalLength)}</div>
+      <div class="cam-field cam-ortho-row" style="${e.projection!=='orthographic'?'display:none':''}"><span>Frame H (mm)</span>${dn('cam-orthoh',1,5000,1,e.orthoHeight)}</div>
+      <div class="cam-field"><span>Clearance (mm)</span>${dn('cam-clear',0,100000,1,e.clearance)}</div>
+      <div class="cam-field"><span>Scan dist (mm)</span>${dn('cam-scan',1,1e7,10,e.scanDistance)}</div>
+      <div class="cam-field"><span>Render BG</span><label class="tgl"><input type="checkbox" id="cam-renderbg${id}" ${e.renderBg!==false?'checked':''}><span class="tgl-track"></span></label></div>`;
+  } else {
+    kindFields = `
+      <div class="cam-field"><span>Clearance (mm)</span>${dn('cam-clear',0,100000,1,e.clearance)}</div>
+      <div class="cam-field"><span>Scan dist (mm)</span>${dn('cam-scan',1,1e7,10,e.scanDistance)}</div>
+      <div class="cam-field"><span>FOV by</span>${seg('cam-fovmode',[['angle','Angle°'],['mm','mm']], e.fovMode)}</div>
+      <div class="cam-field cam-fov3-row" style="${e.fovMode!=='angle'?'display:none':''}"><span>FOV (°)</span>${dn('cam-fov3',1,170,1,e.fov3d)}</div>
+      <div class="cam-field cam-fov3mm-row" style="${e.fovMode!=='mm'?'display:none':''}"><span>FOV plane (mm)</span>${dn('cam-fov3mm',1,5000,1,e.fov3dMm)}</div>
+      <div class="cam-field"><span>Normals</span><label class="tgl"><input type="checkbox" id="cam-normals${id}" ${e.captureNormals?'checked':''}><span class="tgl-track"></span></label></div>
+      <div class="cam-field"><span>Capture</span>${seg('cam-ptmode',[['first','First hit'],['first-color','First+color'],['all','All hits']], e.pointMode)}</div>`;
+  }
+
+  root.innerHTML = `
+    <div class="cam-field"><span>Resolution X</span>${dn('cam-resx',1,8192,1,e.resX)}</div>
+    <div class="cam-field"><span>Resolution Y</span>${dn('cam-resy',1,8192,1,e.resY)}</div>
+    ${kindFields}
+    <div class="subsec-lbl">Position</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span>${dn('cam-px',-1e6,1e6,1,+p.x.toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl y">Y</span>${dn('cam-py',-1e6,1e6,1,+p.y.toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl z">Z</span>${dn('cam-pz',-1e6,1e6,1,+p.z.toFixed(2))}</div>
+    </div>
+    <div class="subsec-lbl">Rotation °</div>
+    <div class="prop-3col">
+      <div class="ax"><span class="ax-lbl x">X</span>${dn('cam-rx',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.x).toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl y">Y</span>${dn('cam-ry',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.y).toFixed(2))}</div>
+      <div class="ax"><span class="ax-lbl z">Z</span>${dn('cam-rz',-360,360,1,+THREE.MathUtils.radToDeg(e.pivot.rotation.z).toFixed(2))}</div>
+    </div>
+    <div class="btn-row" style="margin-top:6px">
+      <button class="sm-btn" id="cam-aim${id}" title="Aim at scene center">Aim at scene</button>
+      <button class="sm-btn" id="cam-show${id}">${shownCamera===e?'Exit view':'Show view'}</button>
+    </div>
+    <button class="sm-btn w100" id="cam-render${id}" style="margin-top:4px">${e.kind==='3d'?'Render point cloud ▼':'Render image (PNG)'}</button>
+    <button class="sm-btn danger w100" id="cam-del${id}" style="margin-top:6px">Delete Camera</button>`;
+  initDNs(root);
+
+  // Checkboxes (normals / render background)
+  const cbN = root.querySelector(`#cam-normals${id}`);
+  if (cbN) cbN.addEventListener('change', () => { e.captureNormals = cbN.checked; });
+  const cbBg = root.querySelector(`#cam-renderbg${id}`);
+  if (cbBg) cbBg.addEventListener('change', () => { e.renderBg = cbBg.checked; });
+
+  // Segmented buttons
+  root.querySelectorAll('.cam-seg').forEach(seg => {
+    seg.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      seg.querySelectorAll('button').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const v = b.dataset.v;
+      if (seg.classList.contains('cam-proj')) e.projection = v;
+      else if (seg.classList.contains('cam-focalmode')) e.focalMode = v;
+      else if (seg.classList.contains('cam-fovmode')) e.fovMode = v;
+      else if (seg.classList.contains('cam-ptmode')) e.pointMode = v;
+      applyCameraParams(e);
+      showCameraProperties(e);   // re-render to toggle conditional rows
+    }));
+  });
+
+  root.addEventListener('dnchange', ev => {
+    const dnEl = ev.target.closest('.dn'); if (!dnEl) return;
+    const v = ev.detail.value;
+    if (dnEl.classList.contains('cam-resx')) e.resX = Math.round(v);
+    else if (dnEl.classList.contains('cam-resy')) e.resY = Math.round(v);
+    else if (dnEl.classList.contains('cam-fov')) e.fov = v;
+    else if (dnEl.classList.contains('cam-focal')) e.focalLength = v;
+    else if (dnEl.classList.contains('cam-orthoh')) e.orthoHeight = v;
+    else if (dnEl.classList.contains('cam-clear')) e.clearance = v;
+    else if (dnEl.classList.contains('cam-scan')) e.scanDistance = v;
+    else if (dnEl.classList.contains('cam-fov3')) e.fov3d = v;
+    else if (dnEl.classList.contains('cam-fov3mm')) e.fov3dMm = v;
+    else if (dnEl.classList.contains('cam-px')) e.pivot.position.x = v;
+    else if (dnEl.classList.contains('cam-py')) e.pivot.position.y = v;
+    else if (dnEl.classList.contains('cam-pz')) e.pivot.position.z = v;
+    else if (dnEl.classList.contains('cam-rx')) e.pivot.rotation.x = THREE.MathUtils.degToRad(v);
+    else if (dnEl.classList.contains('cam-ry')) e.pivot.rotation.y = THREE.MathUtils.degToRad(v);
+    else if (dnEl.classList.contains('cam-rz')) e.pivot.rotation.z = THREE.MathUtils.degToRad(v);
+    e.pivot.updateMatrixWorld(true);
+    applyCameraParams(e); updateCameraMarker(e);
+  });
+
+  root.querySelector(`#cam-aim${id}`).addEventListener('click', () => {
+    const b = new THREE.Box3(); objects.forEach(o => { if (o.visible !== false) b.expandByObject(o.group); });
+    const c = b.isEmpty() ? new THREE.Vector3(0,0,0) : b.getCenter(new THREE.Vector3());
+    // The child camera looks down the pivot's local -Z. Matrix4.lookAt(eye,target,up)
+    // builds an orientation whose -Z points from eye toward target — exactly the
+    // camera convention — so the camera ends up looking AT the scene center.
+    const m = new THREE.Matrix4();
+    m.lookAt(e.pivot.position, c, new THREE.Vector3(0, 0, 1));
+    e.pivot.quaternion.setFromRotationMatrix(m);
+    e.pivot.updateMatrixWorld(true); e.helper.update();
+    showCameraProperties(e);
+  });
+  root.querySelector(`#cam-show${id}`).addEventListener('click', () => {
+    if (shownCamera === e) exitCameraView(); else showCameraView(e);
+    showCameraProperties(e);
+  });
+  root.querySelector(`#cam-render${id}`).addEventListener('click', () => {
+    if (e.kind === '3d') renderPointCloud(e); else renderCameraImage(e, { transparentBg: e.renderBg === false });
+  });
+  root.querySelector(`#cam-del${id}`).addEventListener('click', () => { if (confirm(`Delete camera "${e.name}"? This cannot be undone.`)) deleteCamera(e); });
+}
+
+// ── Render modal helper ──
+function showRenderModal(title, contentEl, actions) {
+  const modal = document.getElementById('render-modal');
+  document.getElementById('render-modal-title').textContent = title;
+  const body = document.getElementById('render-modal-body'); body.innerHTML = ''; body.appendChild(contentEl);
+  const act = document.getElementById('render-modal-actions'); act.innerHTML = '';
+  actions.forEach(a => { const b = document.createElement('button'); b.className = 'hb-btn'; b.textContent = a.label; b.addEventListener('click', a.onClick); act.appendChild(b); });
+  modal.style.display = 'flex';
+}
+function hideRenderModal() { document.getElementById('render-modal').style.display = 'none'; }
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// ── 2D camera → PNG image ──
+function renderCameraImage(e, opts = {}) {
+  const transparentBg = !!opts.transparentBg;
+  applyCameraParams(e); e.threeCam.updateMatrixWorld(true);
+  const w = Math.max(1, Math.round(e.resX)), h = Math.max(1, Math.round(e.resY));
+  const target = new THREE.WebGLRenderTarget(w, h, { samples: 4 });
+  const prevCamVis = cameras.map(c => [c.helper.visible, c.body.visible]);
+  cameras.forEach(c => { c.helper.visible = false; c.body.visible = false; });  // don't render any camera markers
+  const tfWasVisible = tfCtrl.visible; tfCtrl.visible = false;
+  // Optionally drop the scene background for a transparent PNG
+  const prevBg = scene.background, prevAlpha = renderer.getClearAlpha();
+  if (transparentBg) { scene.background = null; renderer.setClearColor(0x000000, 0); }
+  renderer.setRenderTarget(target);
+  renderer.clear();
+  renderer.render(scene, e.threeCam);
+  const buf = new Uint8Array(w * h * 4);
+  renderer.readRenderTargetPixels(target, 0, 0, w, h, buf);
+  renderer.setRenderTarget(null);
+  if (transparentBg) { scene.background = prevBg; renderer.setClearColor(0x000000, prevAlpha); }
+  cameras.forEach((c, i) => { c.helper.visible = prevCamVis[i][0]; c.body.visible = prevCamVis[i][1]; }); tfCtrl.visible = tfWasVisible;
+  target.dispose();
+  // Flip vertically into a 2D canvas (WebGL origin is bottom-left)
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d'); const img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) {
+    const sy = (h - 1 - y);
+    for (let x = 0; x < w; x++) {
+      const d = (y * w + x) * 4, s = (sy * w + x) * 4;
+      img.data[d] = buf[s]; img.data[d+1] = buf[s+1]; img.data[d+2] = buf[s+2]; img.data[d+3] = buf[s+3];
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  // Draw annotation value labels (the 3D arrows are already in the render, but the
+  // text labels are HTML overlays, so paint them onto the canvas at projected coords).
+  drawAnnotationLabels(ctx, e.threeCam, w, h);
+  showRenderModal(`${e.name} — ${w}×${h}`, cv, [
+    { label: transparentBg ? 'Transparent: ON' : 'Transparent: OFF',
+      onClick: () => renderCameraImage(e, { transparentBg: !transparentBg }) },
+    { label: 'Download PNG', onClick: () => cv.toBlob(b => downloadBlob(b, e.name.replace(/\s+/g,'_') + '.png'), 'image/png') },
+    { label: 'Close', onClick: hideRenderModal },
+  ]);
+}
+
+// Paint measurement value labels onto a render canvas by projecting their 3D
+// anchor points through the given camera (mirrors the on-screen DOM overlay).
+function drawAnnotationLabels(ctx, cam, w, h) {
+  cam.updateMatrixWorld(true);
+  const v = new THREE.Vector3();
+  measurements.forEach(m => {
+    if (m.visible === false) return;
+    // Anchor: midpoint for distance, apex for angle
+    if (m.type === 'angle') v.copy(m.apex); else v.copy(m.p1).add(m.p2).multiplyScalar(0.5);
+    const p = v.clone().project(cam);
+    if (p.z < -1 || p.z > 1) return;                 // outside near/far
+    if (p.x < -1 || p.x > 1 || p.y < -1 || p.y > 1) return; // outside frame
+    const sx = (p.x * 0.5 + 0.5) * w, sy = (-p.y * 0.5 + 0.5) * h;
+    const text = m.label || '';
+    if (!text) return;
+    const fs = Math.max(10, Math.round((m.style?.fontSize || 14) * (w / 800)));
+    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const padX = fs * 0.45, padY = fs * 0.28;
+    const tw = ctx.measureText(text).width;
+    const bg = m.style?.bgColor || '#111111';
+    const op = (m.style?.bgOpacity != null ? m.style.bgOpacity : 80) / 100;
+    ctx.globalAlpha = op; ctx.fillStyle = bg;
+    roundRect(ctx, sx - tw/2 - padX, sy - fs/2 - padY, tw + padX*2, fs + padY*2, 4); ctx.fill();
+    ctx.globalAlpha = 1; ctx.fillStyle = m.style?.textColor || '#ffffff';
+    ctx.fillText(text, sx, sy);
+  });
+}
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
+}
+
+// ── 3D camera → point cloud (rays in the frustum pyramid) ──
+function renderPointCloud(e) {
+  applyCameraParams(e); e.threeCam.updateMatrixWorld(true);
+  const cam = e.threeCam;
+  const nx = Math.max(1, Math.round(e.resX)), ny = Math.max(1, Math.round(e.resY));
+  const near = Math.max(0, e.clearance || 0);          // ignore hits closer than this
+  const far  = Math.max(near + 1, e.scanDistance || 1000);
+  const meshes = []; objects.forEach(o => { if (o.visible !== false) o.meshChildren.forEach(({ mesh }) => { if (mesh.visible) meshes.push(mesh); }); });
+  const ray = new THREE.Raycaster(); ray.near = near; ray.far = far;
+  const origin = new THREE.Vector3(); cam.getWorldPosition(origin);
+  const pts = [];                          // dense list (preview + unorganized export)
+  const grid = new Array(nx * ny).fill(null); // organized grid: one first-hit per ray (row-major)
+  const mode = e.pointMode;
+  const wantNormals = !!e.captureNormals;
+  const clamp255 = n => Math.max(0, Math.min(255, Math.round(n)));
+  const buildRec = (hit) => {
+    const pt = hit.point;
+    if (!isFinite(pt.x) || !isFinite(pt.y) || !isFinite(pt.z)) return null;
+    let r = 200, g = 200, b = 200;
+    if (mode === 'first-color' && hit.object.material && hit.object.material.color) {
+      const c = hit.object.material.color; r = clamp255(c.r*255); g = clamp255(c.g*255); b = clamp255(c.b*255);
+    }
+    const rec = { x: pt.x, y: pt.y, z: pt.z, r, g, b };
+    if (wantNormals && hit.face) {
+      const nm = new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld);
+      const n = hit.face.normal.clone().applyMatrix3(nm).normalize();
+      const toCam = origin.clone().sub(pt);
+      if (n.dot(toCam) < 0) n.negate();
+      if (isFinite(n.x) && isFinite(n.y) && isFinite(n.z)) { rec.nx = n.x; rec.ny = n.y; rec.nz = n.z; }
+    }
+    return rec;
+  };
+  // Project a grid of NDC points through the camera; each defines a ray direction.
+  for (let iy = 0; iy < ny; iy++) {
+    const ndcY = ny === 1 ? 0 : (iy / (ny - 1)) * 2 - 1;
+    for (let ix = 0; ix < nx; ix++) {
+      const ndcX = nx === 1 ? 0 : (ix / (nx - 1)) * 2 - 1;
+      ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), cam);
+      const hits = ray.intersectObjects(meshes, false).filter(h => h.distance >= near && h.distance <= far);
+      if (!hits.length) continue;
+      const take = (mode === 'all') ? hits : [hits[0]];
+      let first = null;
+      take.forEach(hit => { const rec = buildRec(hit); if (rec) { pts.push(rec); if (!first) first = rec; } });
+      grid[iy * nx + ix] = first;   // organized = single (first) hit per ray, in NDC-grid order
+    }
+  }
+  // Build a small preview canvas (top-down scatter) + export buttons
+  const info = document.createElement('div');
+  info.style.cssText = 'display:flex;flex-direction:column;gap:8px;align-items:center;color:var(--b8);font-size:12px';
+  const stat = document.createElement('div');
+  stat.textContent = `${pts.length.toLocaleString()} points captured (${nx}×${ny} rays, ${mode}${wantNormals?', +normals':''}, range ${near}–${far} mm)`;
+  const cv = document.createElement('canvas'); cv.width = 360; cv.height = 240; cv.style.background = '#111';
+  drawCloudPreview(cv, pts);
+  info.appendChild(stat); info.appendChild(cv);
+  // Organized-export option: keeps the full ${nx}×${ny} grid (WIDTH×HEIGHT) with
+  // 'nan' for rays that missed, instead of a flat dense list.
+  const orgWrap = document.createElement('label');
+  orgWrap.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px;color:var(--b8);cursor:pointer';
+  orgWrap.innerHTML = `<input type="checkbox" id="cloud-organized"> Organized (${nx}×${ny} grid, keeps structure + empty points as NaN)`;
+  info.appendChild(orgWrap);
+  if (!pts.length) stat.textContent = 'No points captured — check camera aim, clearance/scan distance, and that objects are in view.';
+  // Build the export array based on the Organized toggle at click time.
+  const exportArr = () => {
+    const org = document.getElementById('cloud-organized')?.checked;
+    if (org) return { arr: grid.map(g => g || { x: NaN, y: NaN, z: NaN, r: 0, g: 0, b: 0, nx: NaN, ny: NaN, nz: NaN }), w: nx, h: ny, organized: true };
+    return { arr: pts, w: pts.length, h: 1, organized: false };
+  };
+  showRenderModal(`${e.name} — point cloud`, info, [
+    { label: 'Download PLY', onClick: () => { const x = exportArr(); downloadBlob(new Blob([cloudToPLY(x.arr, wantNormals)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.ply'); } },
+    { label: 'Download PCD', onClick: () => { const x = exportArr(); downloadBlob(new Blob([cloudToPCD(x.arr, wantNormals, x.w, x.h)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.pcd'); } },
+    { label: 'Download XYZ', onClick: () => { const x = exportArr(); downloadBlob(new Blob([cloudToXYZ(x.arr, wantNormals)], {type:'text/plain'}), e.name.replace(/\s+/g,'_') + '.xyz'); } },
+    { label: 'Close', onClick: hideRenderModal },
+  ]);
+}
+
+function drawCloudPreview(cv, pts) {
+  const ctx = cv.getContext('2d'); ctx.clearRect(0,0,cv.width,cv.height);
+  if (!pts.length) return;
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  pts.forEach(p => { if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y; });
+  const sx = (cv.width-20)/Math.max(maxX-minX,1e-6), sy = (cv.height-20)/Math.max(maxY-minY,1e-6), s = Math.min(sx,sy);
+  pts.forEach(p => {
+    const px = 10 + (p.x-minX)*s, py = cv.height - (10 + (p.y-minY)*s);
+    ctx.fillStyle = `rgb(${p.r},${p.g},${p.b})`; ctx.fillRect(px, py, 1.5, 1.5);
+  });
+}
+function cloudToXYZ(pts, withNormals) {
+  const fc = v => isFinite(v) ? v.toFixed(4) : 'nan';
+  const fn = v => isFinite(v) ? v.toFixed(5) : 'nan';
+  return pts.map(p => {
+    let s = `${fc(p.x)} ${fc(p.y)} ${fc(p.z)} ${p.r|0} ${p.g|0} ${p.b|0}`;
+    if (withNormals) s += ` ${fn(p.nx)} ${fn(p.ny)} ${fn(p.nz)}`;
+    return s;
+  }).join('\n') + '\n';
+}
+function cloudToPLY(pts, withNormals) {
+  const fc = v => isFinite(v) ? v.toFixed(4) : 'nan';
+  const fn = v => isFinite(v) ? v.toFixed(5) : 'nan';
+  const nprops = withNormals ? `property float nx\nproperty float ny\nproperty float nz\n` : '';
+  const head = `ply\nformat ascii 1.0\ncomment Generated by Scene Builder\nelement vertex ${pts.length}\nproperty float x\nproperty float y\nproperty float z\n${nprops}property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n`;
+  const body = pts.map(p => {
+    let s = `${fc(p.x)} ${fc(p.y)} ${fc(p.z)}`;
+    if (withNormals) s += ` ${fn(p.nx)} ${fn(p.ny)} ${fn(p.nz)}`;
+    s += ` ${p.r|0} ${p.g|0} ${p.b|0}`;
+    return s;
+  }).join('\n');
+  return head + body + '\n';
+}
+function cloudToPCD(pts, withNormals, width, height) {
+  const W = width || pts.length, H = height || 1;
+  const fc = v => isFinite(v) ? v.toFixed(4) : 'nan';
+  const fn = v => isFinite(v) ? v.toFixed(5) : 'nan';
+  const fields = withNormals ? 'x y z normal_x normal_y normal_z rgb' : 'x y z rgb';
+  const size   = withNormals ? '4 4 4 4 4 4 4' : '4 4 4 4';
+  const type   = withNormals ? 'F F F F F F U' : 'F F F U';
+  const count  = withNormals ? '1 1 1 1 1 1 1' : '1 1 1 1';
+  const head = `# .PCD v0.7 - Point Cloud Data file format\nVERSION 0.7\nFIELDS ${fields}\nSIZE ${size}\nTYPE ${type}\nCOUNT ${count}\nWIDTH ${W}\nHEIGHT ${H}\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS ${pts.length}\nDATA ascii\n`;
+  return head + pts.map(p => {
+    const rgb = (((p.r|0)<<16)|((p.g|0)<<8)|(p.b|0))>>>0;
+    let s = `${fc(p.x)} ${fc(p.y)} ${fc(p.z)}`;
+    if (withNormals) s += ` ${fn(p.nx)} ${fn(p.ny)} ${fn(p.nz)}`;
+    s += ` ${rgb}`;
+    return s;
+  }).join('\n') + '\n';
+}
+
+// ── GRID + AXES ───────────────────────────────────────────────────────────────
+const grid = new THREE.GridHelper(5000, 100, 0x303040, 0x222028);
+grid.rotation.x = Math.PI / 2; scene.add(grid);
+const axisHelper = new THREE.AxesHelper(60); scene.add(axisHelper);
+function setGridVis(v) { grid.visible = v; axisHelper.visible = v; document.getElementById('btn-grid').classList.toggle('active', v); }
+
+// ── LOADERS ───────────────────────────────────────────────────────────────────
+const occtReady = occtimportjs({ locateFile: f => `./vendor/occt/${f}` });
+const gltfLoader = new GLTFLoader();
+const objLoader  = new OBJLoader();
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+let objects = [], selected = null, multiSel = new Set(), mode = 'select';
+let measPts = [], measurements = [], angMeasPts = [], selectedMeas = null, selectedLight = null, measNextId = 1, nextId = 1;
+let dragHandle = null, dragHandleMeas = null;
+let gizmoHandle = null, gizmoHandleMeas = null;  // measurement handle attached to TransformControls
+let lightGroups = [], measGroups = [];           // grouping for lights & annotations
+let lightMultiSel = new Set(), measMultiSel = new Set();
+let groupId = 1;
+
+// ── RESIZE ────────────────────────────────────────────────────────────────────
+function resize() {
+  const w = wrap.clientWidth, h = Math.max(wrap.clientHeight, 1);
+  renderer.setSize(w, h);
+  perspCam.aspect = w / h; perspCam.updateProjectionMatrix();
+  renderCam.aspect = w / h; renderCam.updateProjectionMatrix();
+  if (isOrtho) setOrthoFrustum();
+}
+new ResizeObserver(resize).observe(wrap); resize();
+
+// ── ANIMATE ───────────────────────────────────────────────────────────────────
+// NOTE: animate is defined here but axis gizmo refs are resolved at call time
+// because JS closures capture variables by reference, not value.
+function animate() {
+  requestAnimationFrame(animate);
+  orbit.update();
+  const cam = usingRenderCam ? renderCam : activeCam;
+  renderer.render(scene, cam);
+  // Picture-in-picture: show the selected camera's view in a corner inset
+  if (shownCamera) renderCameraPiP(shownCamera);
+  updateMeasLabels();
+}
+
+// Render the camera's view into a small inset (bottom-right) using scissor/viewport.
+function renderCameraPiP(e) {
+  applyCameraParams(e); e.threeCam.updateMatrixWorld(true);
+  // All coordinates here are in CSS pixels — three.js multiplies by the device
+  // pixel ratio internally for setViewport/setScissor, so we must NOT pre-multiply.
+  const fullW = wrap.clientWidth, fullH = wrap.clientHeight;
+  const aspect = Math.max(e.resX,1) / Math.max(e.resY,1);
+  let pw = Math.min(Math.max(fullW * 0.32, 180), 420);
+  let ph = pw / aspect;
+  const maxH = fullH * 0.5;
+  if (ph > maxH) { ph = maxH; pw = ph * aspect; }
+  const margin = 12, x = margin, y = margin;   // bottom-left (GL origin is bottom-left)
+  // Hide only the camera MARKERS in the inset (leave the transform gizmo + its
+  // interaction completely untouched, so object dragging keeps working).
+  const prevVis = cameras.map(c => [c.helper.visible, c.body.visible]);
+  cameras.forEach(c => { c.helper.visible = false; c.body.visible = false; });
+  renderer.setScissorTest(true);
+  // Border frame
+  renderer.setViewport(x - 2, y - 2, pw + 4, ph + 4);
+  renderer.setScissor(x - 2, y - 2, pw + 4, ph + 4);
+  renderer.setClearColor(0x4a90d9, 1); renderer.clearColor();
+  // Inset content
+  renderer.setViewport(x, y, pw, ph);
+  renderer.setScissor(x, y, pw, ph);
+  renderer.setClearColor(0x111316, 1); renderer.clearColor();
+  renderer.render(scene, e.threeCam);
+  // Restore full viewport + state for the next frame's main render
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, fullW, fullH);
+  renderer.setScissor(0, 0, fullW, fullH);
+  cameras.forEach((c, i) => { c.helper.visible = prevVis[i][0]; c.body.visible = prevVis[i][1]; });
+  renderer.setClearColor(0x000000, 0);
+}
+// ── FIT ───────────────────────────────────────────────────────────────────────
+function fitToView(obj3d) {
+  const box = new THREE.Box3().setFromObject(obj3d); if (box.isEmpty()) return;
+  const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3()), d = Math.max(s.x, s.y, s.z, 1);
+  orbit.target.copy(c);
+  const dir = perspCam.position.clone().sub(c).normalize();
+  if (dir.lengthSq() < .001) dir.set(.6, -.6, .5).normalize();
+  perspCam.position.copy(c).addScaledVector(dir, d * 2.5);
+  orbit.update(); if (isOrtho) { orthoCam.position.copy(perspCam.position); setOrthoFrustum(); }
+}
+function fitAll() {
+  const b = new THREE.Box3(); objects.forEach(o => b.expandByObject(o.group));
+  if (b.isEmpty()) return;
+  const c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3()), d = Math.max(s.x, s.y, s.z, 1);
+  orbit.target.copy(c);
+  perspCam.position.copy(c).addScaledVector(perspCam.position.clone().sub(c).normalize(), d * 2.5);
+  orbit.update();
+}
+
+// Fit every directional light's shadow camera to the current scene bounds so
+// shadows cover all geometry (not just a tiny patch near the origin).
+function updateShadowCameras() {
+  const b = new THREE.Box3();
+  objects.forEach(o => b.expandByObject(o.group));
+  let radius = 600, center = new THREE.Vector3();
+  if (!b.isEmpty()) { center = b.getCenter(new THREE.Vector3()); radius = Math.max(b.getSize(new THREE.Vector3()).length() * 0.6, 50); }
+  dirLights.forEach(l => {
+    const sh = l.light.shadow; const cam = sh.camera;
+    cam.left = -radius; cam.right = radius; cam.top = radius; cam.bottom = -radius;
+    cam.near = 1; cam.far = radius * 6;
+    cam.updateProjectionMatrix();
+    if (sh.map) { sh.map.dispose(); sh.map = null; }
+  });
+}
+
+function setShadowsEnabled(on) {
+  shadowsEnabled = on;
+  renderer.shadowMap.enabled = on;
+  dirLights.forEach(l => { l.light.castShadow = on; });
+  // Force shadow maps to refresh
+  renderer.shadowMap.needsUpdate = true;
+  objects.forEach(o => o.meshChildren.forEach(({ mesh }) => { mesh.material.needsUpdate = true; }));
+}
+
+// ── GEOMETRY BUILDER ─────────────────────────────────────────────────────────
+function mkMesh(pos, nor, idx, color) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  if (nor) g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  if (idx) g.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
+  if (!nor) g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ color, metalness: .6, roughness: .3 });
+  const mesh = new THREE.Mesh(g, m); mesh.castShadow = mesh.receiveShadow = true; return mesh;
+}
+
+// ── FILE LOADERS ──────────────────────────────────────────────────────────────
+async function parseSTEP(buf) {
+  const occt = await occtReady, result = occt.ReadStepFile(new Uint8Array(buf), { linearDeflection: .01, angularDeflection: .5 });
+  if (!result?.success || !result.meshes?.length) throw new Error('No geometry');
+  const grp = new THREE.Group(), mc = [];
+  result.meshes.forEach(m => {
+    const pos = m.attributes?.position?.array; if (!pos) return;
+    const nor = m.attributes?.normal?.array, idx = m.index?.array;
+    const bc = m.color ? new THREE.Color(m.color[0], m.color[1], m.color[2]) : new THREE.Color(0x888888);
+    const faces = m.brep_faces || [], hfc = faces.some(f => f.color !== null), pn = m.name || 'Part';
+    if (!hfc) { const mesh = mkMesh(pos, nor, idx, bc); mesh.userData.partName = pn; grp.add(mesh); mc.push({ mesh, originalColor: bc.clone(), partName: pn }); return; }
+    faces.forEach((f, fi) => {
+      const fc = f.color ? new THREE.Color(f.color[0], f.color[1], f.color[2]) : bc; let mesh;
+      if (idx) {
+        const sl = Array.from(idx.slice(f.first * 3, (f.last + 1) * 3));
+        const uv = [...new Set(sl)].sort((a, b) => a - b), rm = new Map(uv.map((v, k) => [v, k]));
+        const sp = new Float32Array(uv.length * 3), sn = nor ? new Float32Array(uv.length * 3) : null;
+        uv.forEach((vi, ki) => { sp[ki*3]=pos[vi*3];sp[ki*3+1]=pos[vi*3+1];sp[ki*3+2]=pos[vi*3+2];if(sn){sn[ki*3]=nor[vi*3];sn[ki*3+1]=nor[vi*3+1];sn[ki*3+2]=nor[vi*3+2];}});
+        mesh = mkMesh(sp, sn, sl.map(v => rm.get(v)), fc);
+      } else { const s = f.first*9, e = (f.last+1)*9; mesh = mkMesh(pos.slice(s,e), nor?.slice(s,e)??null, null, fc); }
+      const fn = `${pn}·f${fi}`; mesh.userData.partName = fn; grp.add(mesh); mc.push({ mesh, originalColor: fc.clone(), partName: fn });
+    });
+  });
+  return { group: grp, meshChildren: mc };
+}
+function parseSTL(buf) {
+  const g = new STLLoader().parse(buf); g.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: .6, roughness: .3 });
+  const mesh = new THREE.Mesh(g, mat); mesh.castShadow = mesh.receiveShadow = true; mesh.userData.partName = 'Body';
+  const grp = new THREE.Group(); grp.add(mesh);
+  return { group: grp, meshChildren: [{ mesh, originalColor: new THREE.Color(0x888888), partName: 'Body' }] };
+}
+function parseGLTF(buf) {
+  return new Promise((res, rej) => {
+    gltfLoader.parse(buf, '', gltf => {
+      const grp = new THREE.Group(), mc = [];
+      gltf.scene.traverse(n => { if (n.isMesh) { n.castShadow = n.receiveShadow = true; mc.push({ mesh: n, originalColor: n.material?.color?.clone() ?? new THREE.Color(0x888888), partName: n.name || 'Mesh' }); } });
+      grp.add(gltf.scene); res({ group: grp, meshChildren: mc });
+    }, rej);
+  });
+}
+function parseOBJ(text) {
+  const result = objLoader.parse(text), grp = new THREE.Group(), mc = [];
+  result.traverse(n => { if (n.isMesh) { n.material = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: .6, roughness: .3 }); n.castShadow = n.receiveShadow = true; mc.push({ mesh: n, originalColor: new THREE.Color(0x888888), partName: n.name || 'Mesh' }); } });
+  grp.add(result); return { group: grp, meshChildren: mc };
+}
+async function loadFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  document.getElementById('loading').style.display = 'flex';
+  try {
+    let r;
+    if (ext === 'stl') r = parseSTL(await file.arrayBuffer());
+    else if (ext === 'step' || ext === 'stp') r = await parseSTEP(await file.arrayBuffer());
+    else if (ext === 'gltf' || ext === 'glb') r = await parseGLTF(await file.arrayBuffer());
+    else if (ext === 'obj') r = parseOBJ(await file.text());
+    else throw new Error('Unsupported: ' + ext);
+    addObject(file.name.replace(/\.[^.]+$/, ''), r.group, r.meshChildren);
+  } catch (err) { alert('Load error: ' + err.message); console.error(err); }
+  finally { document.getElementById('loading').style.display = 'none'; }
+}
+
+// ── OBJECT MANAGEMENT ─────────────────────────────────────────────────────────
+function addObject(name, group, meshChildren, skipFit = false) {
+  scene.add(group);
+  const obj = { id: nextId++, name, group, visible: true, meshChildren, isGroup: false, childIds: [], _children: [], _expanded: false };
+  objects.push(obj); if (!skipFit) fitToView(group);
+  updateShadowCameras();
+  setSelected(obj); refreshOutliner(); updateStatus();
+}
+// Clear emissive highlight on every mesh in the whole scene graph of objects
+function clearAllHighlights() {
+  objects.forEach(o => {
+    o.meshChildren.forEach(({ mesh }) => mesh.material.emissive && mesh.material.emissive.setHex(0));
+    (o._children || []).forEach(c => c.meshChildren.forEach(({ mesh }) => mesh.material.emissive && mesh.material.emissive.setHex(0)));
+  });
+}
+function applyHighlight(obj, on) {
+  if (!obj) return;
+  const hex = on ? 0x0d1a2e : 0;
+  obj.meshChildren.forEach(({ mesh }) => mesh.material.emissive && mesh.material.emissive.setHex(hex));
+}
+function setSelected(obj) {
+  if (obj) { detachHandleGizmo(); selectedLight = null; selectedMeas = null; selectedCamera = null; }
+  clearAllHighlights();
+  tfCtrl.detach();
+  selected = obj;
+  multiSel = new Set(obj ? [obj.id] : []);
+  if (obj) { applyHighlight(obj, true); if (mode === 'select') tfCtrl.attach(obj.group); }
+  updateMeasHandleVis();
+  refreshOutliner(); refreshPropsTab(); updateStatus();
+}
+function toggleMultiSel(obj) {
+  // Clicking a light/annotation context away — clear them
+  selectedLight = null; selectedMeas = null;
+  if (multiSel.has(obj.id)) {
+    multiSel.delete(obj.id);
+    applyHighlight(obj, false);
+    if (obj === selected) selected = multiSel.size ? (objects.find(o => multiSel.has(o.id)) || null) : null;
+  } else {
+    multiSel.add(obj.id);
+    applyHighlight(obj, true);
+    selected = obj;
+  }
+  tfCtrl.detach();
+  if (selected && mode === 'select') tfCtrl.attach(selected.group);
+  refreshOutliner(); refreshPropsTab(); updateStatus();
+}
+function setMode(m) {
+  mode = m;
+  // Leaving measure/angle modes detaches any handle gizmo
+  if (m !== 'measure' && m !== 'angle') detachHandleGizmo();
+  if (selected) { if (m === 'select') tfCtrl.attach(selected.group); else tfCtrl.detach(); }
+  tfCtrl.enabled = (m === 'select' || m === 'measure' || m === 'angle');
+  document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  const lbl = { select: 'Select', edit: 'Face Paint', measure: 'Distance', angle: 'Angle — 3 points' };
+  document.getElementById('mode-label').textContent = lbl[m] || m;
+  document.getElementById('st-mode').textContent = lbl[m] || m;
+  document.getElementById('sec-paint-wrap').style.display = m === 'edit' ? '' : 'none';
+  if (m === 'edit' && selected) buildFaceList(selected);
+  if (m !== 'edit') clearHover();
+  if (m === 'measure' || m === 'angle') {
+    // Show annotation defaults so style can be set before placing points
+    if (!selectedMeas && !selectedLight && !selected) {
+      showPropertiesForSelection();
+      const sec = document.getElementById('sec-annot-def');
+      if (sec && sec.classList.contains('hidden')) { sec.classList.remove('hidden'); const chev = document.querySelector('[data-sec="annot-def"] .rp-chev'); if (chev) chev.textContent = '▾'; }
+    }
+  }
+  measPts = []; angMeasPts = []; updateMeasHandleVis();
+}
+function setGizmo(m) {
+  gizmoMode = m;
+  tfCtrl.setMode(m);
+  document.querySelectorAll('.tool-btn[data-gizmo]').forEach(b => b.classList.toggle('active', b.dataset.gizmo === m));
+}
+
+// ── RAYCASTER ─────────────────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster(), mouse2 = new THREE.Vector2();
+function getRay(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse2.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse2.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse2, usingRenderCam ? renderCam : activeCam);
+}
+
+// Given any hit Object3D (possibly a nested child mesh), find which scene object
+// (top-level or group) owns it. Walks up the parent chain matching group nodes.
+function ownerObjectOf(node) {
+  // Direct mesh match first
+  for (const o of objects) {
+    if (o.meshChildren.some(mc => mc.mesh === node)) return o;
+    if (o._children) for (const c of o._children) if (c.meshChildren.some(mc => mc.mesh === node)) return o;
+  }
+  // Walk up: find the object whose .group is an ancestor of the hit node
+  let n = node;
+  while (n) {
+    const o = objects.find(ob => ob.group === n);
+    if (o) return o;
+    n = n.parent;
+  }
+  return null;
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  getRay(e);
+  const allM = objects.flatMap(o => o.meshChildren.map(mc => mc.mesh));
+
+  if (mode === 'select') {
+    if (tfCtrl.dragging) return;
+    // If an annotation is selected, its yellow/orange handles are the only pickable
+    // things — grab one to move it, click empty space to deselect the annotation.
+    if (selectedMeas) {
+      const sh = selectedMeas.handles || [];
+      const shHits = sh.length ? raycaster.intersectObjects(sh, false) : [];
+      if (shHits.length) {
+        gizmoHandle = shHits[0].object; gizmoHandleMeas = selectedMeas;
+        tfCtrl.setMode('translate'); tfCtrl.attach(gizmoHandle); tfCtrl.enabled = true;
+        return;
+      }
+      // clicked away → deselect annotation
+      detachHandleGizmo(); selectedMeas = null; showPropertiesForSelection(); refreshOutliner();
+      // fall through to normal object/light picking below
+    }
+    // First check visible light gizmos (their pivot spheres)
+    const visLightPivots = dirLights.filter(l => l.visible && l.gizmoVisible !== false).map(l => l.pivot);
+    const lpHits = visLightPivots.length ? raycaster.intersectObjects(visLightPivots, true) : [];
+    if (lpHits.length) {
+      // Walk up to find which light pivot was hit
+      let node = lpHits[0].object, lite = null;
+      while (node && !lite) { lite = dirLights.find(l => l.pivot === node); node = node.parent; }
+      if (lite) { selectLight(lite); return; }
+    }
+    // Camera bodies
+    const visCamBodies = cameras.filter(c => c.visible && c.gizmoVisible !== false).map(c => c.body);
+    const cbHits = visCamBodies.length ? raycaster.intersectObjects(visCamBodies, false) : [];
+    if (cbHits.length) {
+      const cam = cameras.find(c => c.body === cbHits[0].object);
+      if (cam) { selectCamera(cam); return; }
+    }
+    const hits = raycaster.intersectObjects(allM, true);
+    if (hits.length) { const obj = ownerObjectOf(hits[0].object); if (obj) e.shiftKey ? toggleMultiSel(obj) : setSelected(obj); else if (!e.shiftKey) setSelected(null); }
+    else if (!e.shiftKey) setSelected(null);
+  }
+  if (mode === 'edit' && selected) {
+    const hits = raycaster.intersectObjects(selected.meshChildren.map(mc => mc.mesh), false);
+    if (!hits.length) return;
+    hits[0].object.material.color.set(document.getElementById('paint-color').value);
+    buildFaceList(selected);
+  }
+  if (mode === 'measure' || mode === 'angle') {
+    // If the transform gizmo is currently being dragged, ignore (don't place points)
+    if (tfCtrl.dragging) return;
+    // Check handle pick first (both modes) — clicking a yellow/orange ball grabs it
+    const allHandles = measurements.flatMap(m => m.handles || []);
+    const hHits = allHandles.length ? raycaster.intersectObjects(allHandles, false) : [];
+    if (hHits.length) {
+      // Attach the move gizmo to the clicked handle (same gizmo as objects)
+      gizmoHandle = hHits[0].object;
+      gizmoHandleMeas = measurements.find(m => m.handles?.includes(gizmoHandle));
+      // Reflect selection in the panel so it shows this annotation's editor
+      selected = null; selectedLight = null; selectedMeas = gizmoHandleMeas || null;
+      if (selectedMeas) showAnnotProperties(selectedMeas);
+      tfCtrl.setMode('translate');
+      tfCtrl.attach(gizmoHandle);
+      tfCtrl.enabled = true;
+      refreshOutliner();
+      return;
+    }
+    // If a handle gizmo is already attached, a click in empty space should NOT
+    // create a new point — it should just deselect the handle. This prevents the
+    // "phantom new annotation" bug when adjusting an existing measurement.
+    if (gizmoHandle) { detachHandleGizmo(); return; }
+    const hits = raycaster.intersectObjects(allM, false); if (!hits.length) return;
+    if (mode === 'measure') {
+      measPts.push({ pt: hits[0].point.clone() });
+      if (measPts.length === 2) { addMeasurement(measPts[0].pt, measPts[1].pt); measPts = []; setMode('select'); }
+    } else if (mode === 'angle') {
+      angMeasPts.push(hits[0].point.clone());
+      const rem = 3 - angMeasPts.length;
+      document.getElementById('mode-label').textContent = rem > 0 ? `Angle — ${rem} more point${rem>1?'s':''}` : 'Angle';
+      if (angMeasPts.length === 3) {
+        addAngleMeasurement(angMeasPts[0], angMeasPts[1], angMeasPts[2]);
+        angMeasPts = []; setMode('select');
+      }
+    }
+  }
+});
+
+renderer.domElement.addEventListener('pointerup', e => {
+  if (dragHandle) { dragHandle = null; orbit.enabled = true; try { renderer.domElement.releasePointerCapture(e.pointerId); } catch (_) {} }
+});
+
+// Hover (face paint) + handle drag
+let _hMesh = null, _hEmissive = 0;
+function clearHover() { if (_hMesh) { _hMesh.material.emissive?.setHex(_hEmissive); _hMesh = null; } document.querySelectorAll('.face-item').forEach(r => r.classList.remove('hovered')); }
+
+renderer.domElement.addEventListener('pointermove', e => {
+  // Drag a measurement endpoint handle
+  if (dragHandle && mode === 'measure') {
+    getRay(e);
+    const camDir = (usingRenderCam ? renderCam : activeCam).getWorldDirection(new THREE.Vector3());
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, dragHandle.position);
+    const pt = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(plane, pt)) {
+      dragHandle.position.copy(pt);
+      const meas = dragHandleMeas || measurements.find(m => m.handles?.includes(dragHandle));
+      if (meas) {
+        const hi = meas.handles.indexOf(dragHandle);
+        if (meas.type === 'angle') {
+          if (hi === 0) meas.p1.copy(pt);
+          else if (hi === 1) meas.apex.copy(pt);
+          else if (hi === 2) meas.p2.copy(pt);
+          rebuildAngle(meas);
+        } else {
+          if (hi === 0) meas.p1.copy(pt); else meas.p2.copy(pt);
+          meas.dist = meas.p1.distanceTo(meas.p2);
+          rebuildMeas(meas);
+        }
+      }
+    }
+    return;
+  }
+  if (mode !== 'edit' || !selected) { clearHover(); return; }
+  getRay(e);
+  const hits = raycaster.intersectObjects(selected.meshChildren.map(mc => mc.mesh), false);
+  const hit = hits.length ? hits[0].object : null;
+  if (hit === _hMesh) return; clearHover();
+  if (hit) {
+    _hMesh = hit; _hEmissive = hit.material.emissive?.getHex() ?? 0; hit.material.emissive?.setHex(0x553300);
+    const idx = selected.meshChildren.findIndex(mc => mc.mesh === hit);
+    document.querySelector(`.face-item[data-idx="${idx}"]`)?.classList.add('hovered');
+  }
+});
+
+// ── TRANSFORM UI ─────────────────────────────────────────────────────────────
+function setDN(id, v) {
+  const inp = document.getElementById(id); if (!inp) return;
+  inp.value = +v.toFixed(3);
+  const dn = inp.closest('.dn'); if (!dn) return;
+  const mn = parseFloat(dn.dataset.min ?? '-1e9'), mx = parseFloat(dn.dataset.max ?? '1e9');
+  const track = dn.querySelector('.dn-track'); if (track) track.style.width = Math.max(0, Math.min(100, (v - mn) / (mx - mn) * 100)) + '%';
+}
+function refreshTfUI() {
+  if (!selected) return;
+  const p = selected.group.position, r = selected.group.rotation, s = selected.group.scale;
+  const d = v => +(THREE.MathUtils.radToDeg(v).toFixed(2));
+  setDN('px', p.x); setDN('py', p.y); setDN('pz', p.z);
+  setDN('rx', d(r.x)); setDN('ry', d(r.y)); setDN('rz', d(r.z));
+  setDN('sx', s.x); setDN('sy', s.y); setDN('sz', s.z);
+  updateDimReadout();
+}
+
+// Local (unrotated) bounding box of an object's geometry at scale=1, cached.
+function localUnitSize(obj) {
+  if (obj._unitSize) return obj._unitSize;
+  const g = obj.group;
+  const sv = g.scale.clone(), qv = g.quaternion.clone(), pv = g.position.clone();
+  g.scale.set(1,1,1); g.quaternion.identity(); g.position.set(0,0,0); g.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(g);
+  g.scale.copy(sv); g.quaternion.copy(qv); g.position.copy(pv); g.updateMatrixWorld(true);
+  const s = box.isEmpty() ? new THREE.Vector3(1,1,1) : box.getSize(new THREE.Vector3());
+  obj._unitSize = new THREE.Vector3(Math.max(s.x,1e-6), Math.max(s.y,1e-6), Math.max(s.z,1e-6));
+  return obj._unitSize;
+}
+// Dimensions (mm) = local unit size × current scale — reflects scale, ignores rotation
+function updateDimReadout() {
+  if (!selected) return;
+  const fx = document.getElementById('dim-x'), fy = document.getElementById('dim-y'), fz = document.getElementById('dim-z');
+  if (!fx) return;
+  if (document.activeElement === fx || document.activeElement === fy || document.activeElement === fz) return;
+  const u = localUnitSize(selected), s = selected.group.scale;
+  const fmt = v => v >= 100 ? v.toFixed(1) : v.toFixed(2);
+  fx.value = fmt(u.x * s.x); fy.value = fmt(u.y * s.y); fz.value = fmt(u.z * s.z);
+}
+// Apply an edited dimension (mm) on one axis by adjusting that axis's scale
+function applyDimEdit(axis) {
+  if (!selected) return;
+  const inp = document.getElementById('dim-' + axis); if (!inp) return;
+  const want = parseFloat(inp.value); if (!isFinite(want) || want <= 0) { updateDimReadout(); return; }
+  const u = localUnitSize(selected);
+  const sc = selected.group.scale;
+  if (axis === 'x') sc.x = want / u.x;
+  if (axis === 'y') sc.y = want / u.y;
+  if (axis === 'z') sc.z = want / u.z;
+  selected.group.updateMatrixWorld(true);
+  refreshTfUI();
+}
+function applyTf() {
+  if (!selected) return;
+  selected.group.position.set(+document.getElementById('px').value, +document.getElementById('py').value, +document.getElementById('pz').value);
+  selected.group.rotation.set(+document.getElementById('rx').value * Math.PI/180, +document.getElementById('ry').value * Math.PI/180, +document.getElementById('rz').value * Math.PI/180);
+  selected.group.scale.set(+document.getElementById('sx').value, +document.getElementById('sy').value, +document.getElementById('sz').value);
+  updateDimReadout();
+}
+function refreshPropsTab() { showPropertiesForSelection(); }
+
+// Contextual properties dispatcher: shows the right pane for current selection
+function showPropertiesForSelection() {
+  const panes = ['props-empty','props-object','props-light','props-annot','props-camera'];
+  const hideAll = () => panes.forEach(p => { const el = document.getElementById(p); if (el) el.style.display = 'none'; });
+  if (selectedCamera) {
+    hideAll(); document.getElementById('props-camera').style.display = '';
+    showCameraProperties(selectedCamera);
+    return;
+  }
+  if (selected) {
+    hideAll(); document.getElementById('props-object').style.display = '';
+    refreshTfUI();
+    // Material section only for real geometry (not light/measurement groups)
+    const hasMat = selected.meshChildren && selected.meshChildren.length > 0 && !selected.isLightGroup && !selected.isMeasGroup;
+    document.getElementById('obj-mat-sec').style.display = hasMat ? '' : 'none';
+    if (mode === 'edit') buildFaceList(selected);
+  } else if (selectedLight) {
+    hideAll(); document.getElementById('props-light').style.display = '';
+    showLightProperties(selectedLight);
+  } else if (selectedMeas) {
+    hideAll(); document.getElementById('props-annot').style.display = '';
+    showAnnotProperties(selectedMeas);
+  } else {
+    hideAll(); document.getElementById('props-empty').style.display = '';
+  }
+}
+
+// ── FACE PAINT ───────────────────────────────────────────────────────────────
+function buildFaceList(obj) {
+  const list = document.getElementById('face-list'); list.innerHTML = '';
+  obj.meshChildren.forEach(({ mesh }, i) => {
+    const hex = '#' + mesh.material.color.getHexString();
+    const row = document.createElement('div'); row.className = 'face-item'; row.dataset.idx = i;
+    row.innerHTML = `<div style="width:12px;height:12px;border-radius:2px;background:${hex};border:1px solid #555;flex-shrink:0"></div><span style="flex:1;font-size:10px;color:var(--b7);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${mesh.userData.partName || 'Face ' + i}</span><input type="color" value="${hex}" style="width:22px;height:16px;border:1px solid var(--b4);border-radius:2px;cursor:pointer;background:none;padding:1px">`;
+    row.querySelector('input').addEventListener('input', e => { mesh.material.color.set(e.target.value); row.querySelector('div').style.background = e.target.value; });
+    row.addEventListener('click', e => { if (e.target.type === 'color') return; document.getElementById('paint-color').value = '#' + mesh.material.color.getHexString(); document.getElementById('csp-paint').style.background = '#' + mesh.material.color.getHexString(); });
+    list.appendChild(row);
+  });
+}
+
+// ── OUTLINER ─────────────────────────────────────────────────────────────────
+function switchTab() { /* tabs removed — properties panel is contextual */ }
+
+function refreshOutliner() {
+  const el = document.getElementById('obj-list');
+  // Container is a drop target for ungrouping: dropping a child here (not on a
+  // group name) removes it from its group. Set once.
+  if (!el._dndInit) {
+    el._dndInit = true;
+    el.addEventListener('dragover', ev => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; });
+    el.addEventListener('drop', ev => {
+      // If the drop landed on a group name, that handler already ran & stopped it.
+      if (ev.target.closest('.obj-row-name')) return;
+      ev.preventDefault();
+      const tok = ev.dataTransfer.getData('text/plain'); const [k, i] = tok.split(':'); const id = parseInt(i, 10);
+      if (k === 'obj') removeObjectFromGroup(id);
+      else if (k === 'light') removeLightFromGroup(id);
+      else if (k === 'meas') removeMeasFromGroup(id);
+      else if (k === 'cam') removeCameraFromGroup(id);
+    });
+  }
+  if (!objects.length && !dirLights.length && !measurements.length && !cameras.length) {
+    el.innerHTML = '<span class="hint">Empty scene — use the Add menu to add lights or primitives, or import a file.</span>';
+    updateStatus(); return;
+  }
+  el.innerHTML = '';
+
+  // Helper to make a generic row
+  function mkRow({ icon, name, sel, multi, indent, vis, onClick, onVis, onExpand, expanded, renameTarget, gizmoBtn, dragObj, dropGroup, dragData, dropAccept }) {
+    const row = document.createElement('div');
+    row.className = 'obj-row' + (sel ? ' selected' : multi ? ' multi' : '') + (indent ? ' obj-child-row' : '');
+    const exp = onExpand ? `<span class="obj-row-eye exp-btn">${expanded ? '▾' : '▸'}</span>` : '<span style="width:14px;display:inline-block"></span>';
+    const renameHtml = renameTarget ? '<span class="obj-row-eye rename-btn" title="Rename">✎</span>' : '';
+    // Optional gizmo-visibility toggle (lights): show/hide the marker without turning the light off
+    const gizmoHtml = gizmoBtn ? `<span class="obj-row-eye gizmo-btn" title="Show/hide gizmo">${gizmoBtn.on ? '◈' : '◇'}</span>` : '';
+    row.innerHTML = `${exp}<span class="obj-row-icon">${icon}</span><span class="obj-row-name">${name}</span><input class="obj-row-edit" type="text" value="${name}">${gizmoHtml}<span class="obj-row-eye vis-btn" title="Toggle visibility">${vis ? '👁' : '◌'}</span>`;
+    if (renameTarget) row.querySelector('.obj-row-name').insertAdjacentHTML('afterend', renameHtml);
+    row.querySelector('.obj-row-name').addEventListener('click', onClick);
+    if (onExpand) row.querySelector('.exp-btn').addEventListener('click', e => { e.stopPropagation(); onExpand(); });
+    if (onVis) row.querySelector('.vis-btn').addEventListener('click', e => { e.stopPropagation(); onVis(); });
+    if (gizmoBtn) row.querySelector('.gizmo-btn').addEventListener('click', e => { e.stopPropagation(); gizmoBtn.onClick(); });
+    if (renameTarget) setupRename(row, renameTarget);
+    // ── Drag & drop (typed tokens "kind:id") ──
+    const token = dragData || (dragObj ? ('obj:' + dragObj.id) : null);
+    if (token) {
+      row.setAttribute('draggable', 'true');
+      row.addEventListener('dragstart', ev => { ev.dataTransfer.setData('text/plain', token); ev.dataTransfer.effectAllowed = 'move'; row.classList.add('dragging'); });
+      row.addEventListener('dragend', () => { row.classList.remove('dragging'); document.querySelectorAll('.drop-target').forEach(r => r.classList.remove('drop-target')); });
+    }
+    const dropFn = dropAccept || (dropGroup ? (tok => { const [k,i] = tok.split(':'); if (k === 'obj') addObjectToGroup(parseInt(i,10), dropGroup); }) : null);
+    if (dropFn) {
+      const nameEl = row.querySelector('.obj-row-name');
+      nameEl.addEventListener('dragover', ev => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; row.classList.add('drop-target'); });
+      nameEl.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+      nameEl.addEventListener('drop', ev => {
+        ev.preventDefault(); ev.stopPropagation(); row.classList.remove('drop-target');
+        dropFn(ev.dataTransfer.getData('text/plain'));
+      });
+    }
+    el.appendChild(row);
+    return row;
+  }
+
+  // ── Objects (with grouping) ──
+  objects.forEach(obj => {
+    mkRow({
+      icon: obj.isGroup ? '⊞' : '📦',
+      name: obj.name,
+      sel: obj === selected, multi: multiSel.has(obj.id) && obj !== selected,
+      vis: obj.visible, renameTarget: obj,
+      expanded: obj._expanded,
+      onExpand: obj.isGroup ? () => { obj._expanded = !obj._expanded; refreshOutliner(); } : null,
+      onClick: e => { if (e.shiftKey) toggleMultiSel(obj); else setSelected(obj); },
+      onVis: () => { obj.visible = !obj.visible; obj.group.visible = obj.visible; refreshOutliner(); },
+      dragObj: obj.isGroup ? null : obj,      // groups themselves aren't draggable into groups
+      dropGroup: obj.isGroup ? obj : null,    // object groups accept drops on their name
+    });
+    if (obj.isGroup && obj._expanded && obj._children?.length) {
+      obj._children.forEach(child => mkRow({
+        icon: '📦', name: child.name, sel: child === selected, indent: true,
+        vis: child.visible, renameTarget: child,
+        onClick: e => { if (e.shiftKey) toggleMultiSel(child); else setSelected(child); },
+        onVis: () => { child.visible = !child.visible; child.group.visible = child.visible; refreshOutliner(); },
+        dragObj: child,   // dragging a child out (onto non-group) ungroups it
+      }));
+    }
+  });
+
+  // ── Lights (with grouping) ──
+  lightGroups.forEach(lg => {
+    const anyGizmo = lg.members.some(l => l.gizmoVisible !== false);
+    mkRow({
+      icon: '💡', name: lg.name, sel: false, vis: lg.visible, renameTarget: lg,
+      expanded: lg._expanded,
+      gizmoBtn: { on: anyGizmo, onClick: () => { const turnOff = anyGizmo; lg.members.forEach(l => { l.gizmoVisible = !turnOff; updateLightMarker(l); }); refreshOutliner(); } },
+      onExpand: () => { lg._expanded = !lg._expanded; refreshOutliner(); },
+      onClick: () => { lg._expanded = !lg._expanded; refreshOutliner(); },
+      onVis: () => { lg.visible = !lg.visible; lg.members.forEach(l => { l.visible = lg.visible; updateLightMarker(l); }); refreshOutliner(); },
+      dropAccept: tok => { const [k,i] = tok.split(':'); if (k === 'light') addLightToGroup(parseInt(i,10), lg); },
+    });
+    if (lg._expanded) lg.members.forEach(l => lightRow(l, true));
+  });
+  // Ungrouped lights
+  dirLights.filter(l => !l._group).forEach(l => lightRow(l, false));
+
+  function lightRow(l, indent) {
+    mkRow({
+      icon: '💡', name: l.name, sel: selectedLight === l, multi: lightMultiSel.has(l.id) && selectedLight !== l,
+      indent, vis: l.visible, renameTarget: l,
+      gizmoBtn: { on: l.gizmoVisible !== false, onClick: () => { l.gizmoVisible = l.gizmoVisible === false ? true : false; updateLightMarker(l); refreshOutliner(); } },
+      onClick: e => { if (e.shiftKey) toggleLightMultiSel(l); else selectLight(l); },
+      onVis: () => { l.visible = !l.visible; updateLightMarker(l); refreshOutliner(); },
+      dragData: 'light:' + l.id,
+    });
+  }
+
+  // ── Measurements (with grouping) ──
+  measGroups.forEach(mg => {
+    mkRow({
+      icon: '📐', name: mg.name, sel: false, vis: mg.visible, renameTarget: mg,
+      expanded: mg._expanded,
+      onExpand: () => { mg._expanded = !mg._expanded; refreshOutliner(); },
+      onClick: () => { mg._expanded = !mg._expanded; refreshOutliner(); },
+      onVis: () => { mg.visible = !mg.visible; mg.members.forEach(m => setMeasVisible(m, mg.visible)); refreshOutliner(); },
+      dropAccept: tok => { const [k,i] = tok.split(':'); if (k === 'meas') addMeasToGroup(parseInt(i,10), mg); },
+    });
+    if (mg._expanded) mg.members.forEach(m => measRow(m, true));
+  });
+  measurements.filter(m => !m._group).forEach(m => measRow(m, false));
+
+  function measRow(m, indent) {
+    mkRow({
+      icon: m.type === 'angle' ? '📐' : '📏', name: m.name || m.label,
+      sel: selectedMeas === m, multi: measMultiSel.has(m.id) && selectedMeas !== m,
+      indent, vis: m.visible !== false, renameTarget: { get name(){return m.name||m.label;}, set name(v){ m.name = v; } },
+      onClick: e => { if (e.shiftKey) toggleMeasMultiSel(m); else selectMeas(m); },
+      onVis: () => { setMeasVisible(m, m.visible === false); refreshOutliner(); },
+      dragData: 'meas:' + m.id,
+    });
+  }
+
+  // ── Cameras (with grouping) ──
+  camGroups.forEach(cg => {
+    const anyGizmo = cg.members.some(c => c.gizmoVisible !== false);
+    mkRow({
+      icon: '🎥', name: cg.name, sel: false, vis: cg.visible, renameTarget: cg,
+      expanded: cg._expanded,
+      gizmoBtn: { on: anyGizmo, onClick: () => { const off = anyGizmo; cg.members.forEach(c => { c.gizmoVisible = !off; updateCameraMarker(c); }); refreshOutliner(); } },
+      onExpand: () => { cg._expanded = !cg._expanded; refreshOutliner(); },
+      onClick: () => { cg._expanded = !cg._expanded; refreshOutliner(); },
+      onVis: () => { cg.visible = !cg.visible; cg.members.forEach(c => { c.visible = cg.visible; updateCameraMarker(c); }); refreshOutliner(); },
+      dropAccept: tok => { const [k,i] = tok.split(':'); if (k === 'cam') addCameraToGroup(parseInt(i,10), cg); },
+    });
+    if (cg._expanded) cg.members.forEach(c => camRow(c, true));
+  });
+  cameras.filter(c => !c._group).forEach(c => camRow(c, false));
+
+  function camRow(c, indent) {
+    mkRow({
+      icon: c.kind === '3d' ? '📷' : '🎥', name: c.name,
+      sel: selectedCamera === c, multi: camMultiSel.has(c.id) && selectedCamera !== c,
+      indent, vis: c.visible, renameTarget: c,
+      gizmoBtn: { on: c.gizmoVisible !== false, onClick: () => { c.gizmoVisible = c.gizmoVisible === false ? true : false; updateCameraMarker(c); refreshOutliner(); } },
+      onClick: e => { if (e.shiftKey) toggleCamMultiSel(c); else selectCamera(c); },
+      onVis: () => { c.visible = !c.visible; updateCameraMarker(c); refreshOutliner(); },
+      dragData: 'cam:' + c.id,
+    });
+  }
+
+  updateStatus();
+}
+
+function setMeasVisible(m, vis) {
+  m.visible = vis;
+  if (m.group3d) m.group3d.visible = vis;
+  if (m.labelEl) m.labelEl.style.display = vis ? '' : 'none';
+}
+
+function selectMeas(m) {
+  setSelected(null); selectedLight = null; selectedCamera = null; selectedMeas = m;
+  detachHandleGizmo();
+  showAnnotProperties(m);
+  updateMeasHandleVis();   // show this annotation's handles even in select mode
+  refreshOutliner();
+}
+
+// ── DRAG & DROP GROUPING (objects) ───────────────────────────────────────────
+// Find an object (top-level or child) and its current parent group by id
+function findObjAndParent(id) {
+  let o = objects.find(x => x.id === id);
+  if (o) return { obj: o, parent: null };
+  for (const g of objects) {
+    if (g.isGroup && g._children) {
+      const c = g._children.find(x => x.id === id);
+      if (c) return { obj: c, parent: g };
+    }
+  }
+  return { obj: null, parent: null };
+}
+
+// Move a dragged object into an existing object group
+function addObjectToGroup(draggedId, group) {
+  if (!group || !group.isGroup) return;
+  const { obj, parent } = findObjAndParent(draggedId);
+  if (!obj || obj === group) return;
+  if (parent === group) return;            // already in this group
+  if (obj.isGroup) { alert('Nested groups are not supported.'); return; }
+  // Remove from previous parent (if any) or from top-level
+  if (parent) {
+    parent.group.remove(obj.group);
+    parent._children = parent._children.filter(c => c !== obj);
+    parent.meshChildren = parent.meshChildren.filter(mc => !obj.meshChildren.includes(mc));
+    if (parent._children.length < 2) dissolveObjGroup(parent, false);
+  } else {
+    scene.remove(obj.group);
+    objects.splice(objects.indexOf(obj), 1);
+  }
+  // Add into target group (preserve world transform)
+  group.group.attach(obj.group);
+  group._children.push(obj);
+  group.meshChildren.push(...obj.meshChildren);
+  group._unitSize = null;
+  group._expanded = true;
+  setSelected(obj);
+  refreshOutliner(); updateStatus();
+}
+
+// Pull a child out of its group back to top level (preserve world transform)
+function removeObjectFromGroup(draggedId) {
+  const { obj, parent } = findObjAndParent(draggedId);
+  if (!obj || !parent) return;             // not in a group
+  parent.group.remove(obj.group);
+  scene.attach(obj.group);
+  parent._children = parent._children.filter(c => c !== obj);
+  parent.meshChildren = parent.meshChildren.filter(mc => !obj.meshChildren.includes(mc));
+  parent._unitSize = null; obj._unitSize = null;
+  objects.push(obj);
+  if (parent._children.length < 2) dissolveObjGroup(parent, false);
+  setSelected(obj);
+  refreshOutliner(); updateStatus();
+}
+
+// Dissolve an object group, returning remaining children to top level
+function dissolveObjGroup(grp, reselect = true) {
+  (grp._children || []).forEach(child => { grp.group.remove(child.group); scene.attach(child.group); objects.push(child); });
+  scene.remove(grp.group);
+  objects.splice(objects.indexOf(grp), 1);
+  if (reselect) { selected = null; multiSel = new Set(); refreshPropsTab(); }
+}
+
+// ── Light grouping by drag & drop ──
+function addLightToGroup(lightId, lg) {
+  const l = dirLights.find(x => x.id === lightId); if (!l || !lg) return;
+  if (l._group === lg) return;
+  if (l._group) { l._group.members = l._group.members.filter(x => x !== l); if (l._group.members.length < 2) dissolveLightGroup(l._group); }
+  l._group = lg; if (!lg.members.includes(l)) lg.members.push(l);
+  lg._expanded = true; refreshOutliner();
+}
+function removeLightFromGroup(lightId) {
+  const l = dirLights.find(x => x.id === lightId); if (!l || !l._group) return;
+  const g = l._group; g.members = g.members.filter(x => x !== l); l._group = null;
+  if (g.members.length < 2) dissolveLightGroup(g);
+  refreshOutliner();
+}
+function dissolveLightGroup(g) { (g.members||[]).forEach(l => l._group = null); lightGroups = lightGroups.filter(x => x !== g); }
+
+// ── Annotation grouping by drag & drop ──
+function addMeasToGroup(measId, mg) {
+  const m = measurements.find(x => x.id === measId); if (!m || !mg) return;
+  if (m._group === mg) return;
+  if (m._group) { m._group.members = m._group.members.filter(x => x !== m); if (m._group.members.length < 2) dissolveMeasGroup(m._group); }
+  m._group = mg; if (!mg.members.includes(m)) mg.members.push(m);
+  mg._expanded = true; refreshOutliner();
+}
+function removeMeasFromGroup(measId) {
+  const m = measurements.find(x => x.id === measId); if (!m || !m._group) return;
+  const g = m._group; g.members = g.members.filter(x => x !== m); m._group = null;
+  if (g.members.length < 2) dissolveMeasGroup(g);
+  refreshOutliner();
+}
+function dissolveMeasGroup(g) { (g.members||[]).forEach(m => m._group = null); measGroups = measGroups.filter(x => x !== g); }
+
+function setupRename(row, obj) {
+  const nameEl = row.querySelector('.obj-row-name'), editEl = row.querySelector('.obj-row-edit'), btn = row.querySelector('.rename-btn'); if (!btn) return;
+  btn.addEventListener('click', e => { e.stopPropagation(); if (editEl.style.display === 'inline-block') { obj.name = editEl.value || obj.name; nameEl.textContent = obj.name; editEl.style.display = 'none'; nameEl.style.display = ''; } else { editEl.style.display = 'inline-block'; nameEl.style.display = 'none'; editEl.focus(); editEl.select(); } });
+  editEl.addEventListener('keydown', e => { if (e.key === 'Enter') { obj.name = editEl.value || obj.name; nameEl.textContent = obj.name; editEl.style.display = 'none'; nameEl.style.display = ''; } if (e.key === 'Escape') { editEl.style.display = 'none'; nameEl.style.display = ''; } e.stopPropagation(); });
+  editEl.addEventListener('click', e => e.stopPropagation()); editEl.addEventListener('pointerdown', e => e.stopPropagation());
+}
+
+// Grouping
+// Multi-select toggles for lights & measurements
+function toggleLightMultiSel(l) {
+  if (lightMultiSel.has(l.id)) lightMultiSel.delete(l.id); else lightMultiSel.add(l.id);
+  selectLight(l);
+}
+function toggleMeasMultiSel(m) {
+  if (measMultiSel.has(m.id)) measMultiSel.delete(m.id); else measMultiSel.add(m.id);
+  selectMeas(m);
+}
+
+document.getElementById('btn-group').addEventListener('click', () => {
+  // Decide what to group based on what is multi-selected
+  const objG = objects.filter(o => multiSel.has(o.id));
+  const litG = dirLights.filter(l => lightMultiSel.has(l.id) && !l._group);
+  const meaG = measurements.filter(m => measMultiSel.has(m.id) && !m._group);
+  const camG = cameras.filter(c => camMultiSel.has(c.id) && !c._group);
+
+  if (objG.length >= 2) {
+    const name = prompt('Group name:', 'Group') || 'Group';
+    const g3d = new THREE.Group(); scene.add(g3d); const allMC = [];
+    objG.forEach(o => { scene.remove(o.group); g3d.add(o.group); allMC.push(...o.meshChildren); });
+    const entry = { id: nextId++, name, group: g3d, visible: true, meshChildren: allMC, isGroup: true, childIds: objG.map(o => o.id), _children: objG, _expanded: true };
+    objG.forEach(o => objects.splice(objects.indexOf(o), 1)); objects.push(entry);
+    multiSel = new Set([entry.id]); setSelected(entry);
+  } else if (litG.length >= 2) {
+    const name = prompt('Light group name:', 'Light Group') || 'Light Group';
+    const lg = { id: 'lg' + (groupId++), name, members: litG, visible: true, _expanded: true };
+    litG.forEach(l => l._group = lg);
+    lightGroups.push(lg); lightMultiSel.clear();
+  } else if (meaG.length >= 2) {
+    const name = prompt('Annotation group name:', 'Annotation Group') || 'Annotation Group';
+    const mg = { id: 'mg' + (groupId++), name, members: meaG, visible: true, _expanded: true };
+    meaG.forEach(m => m._group = mg);
+    measGroups.push(mg); measMultiSel.clear();
+  } else if (camG.length >= 2) {
+    const name = prompt('Camera group name:', 'Camera Group') || 'Camera Group';
+    const cg = { id: 'cg' + (groupId++), name, members: camG, visible: true, _expanded: true };
+    camG.forEach(c => c._group = cg);
+    camGroups.push(cg); camMultiSel.clear();
+  } else {
+    alert('Shift+click ≥2 items of the same kind (objects, lights, annotations, or cameras) to group them.');
+    return;
+  }
+  refreshOutliner(); updateStatus();
+});
+
+document.getElementById('btn-ungroup').addEventListener('click', () => {
+  // Object group selected?
+  if (selected && selected.isGroup) {
+    const grp = selected;
+    (grp._children || []).forEach(child => { grp.group.remove(child.group); scene.add(child.group); objects.push(child); });
+    scene.remove(grp.group); objects.splice(objects.indexOf(grp), 1);
+    selected = null; multiSel = new Set(); refreshOutliner(); refreshPropsTab(); updateStatus();
+    return;
+  }
+  // Light group? (ungroup the group containing the selected light)
+  if (selectedLight && selectedLight._group) {
+    const lg = selectedLight._group; lg.members.forEach(l => l._group = null);
+    lightGroups = lightGroups.filter(g => g !== lg); refreshOutliner(); return;
+  }
+  // Camera group?
+  if (selectedCamera && selectedCamera._group) {
+    const cg = selectedCamera._group; cg.members.forEach(c => c._group = null);
+    camGroups = camGroups.filter(g => g !== cg); refreshOutliner(); return;
+  }
+  // Annotation group?
+  if (selectedMeas && selectedMeas._group) {
+    const mg = selectedMeas._group; mg.members.forEach(m => m._group = null);
+    measGroups = measGroups.filter(g => g !== mg); refreshOutliner(); return;
+  }
+});
+
+// ── DN EVENT BUS ─────────────────────────────────────────────────────────────
+document.addEventListener('dnchange', e => {
+  const f = e.detail.field, v = e.detail.value;
+  if (['px','py','pz','rx','ry','rz','sx','sy','sz'].includes(f)) applyTf();
+  else if (f === 'amb-int') ambLight.intensity = v;
+  else if (f === 'metalness' && selected) selected.meshChildren.forEach(({ mesh }) => mesh.material.metalness = v);
+  else if (f === 'roughness' && selected) selected.meshChildren.forEach(({ mesh }) => mesh.material.roughness = v);
+});
+document.addEventListener('swchange', e => {
+  const { id, value } = e.detail;
+  if (id === 'bg-color') { scene.background = new THREE.Color(value); document.getElementById('csp-bg').style.background = value; }
+  else if (id === 'amb-sky') ambLight.color.set(value);
+  else if (id === 'amb-ground') ambLight.groundColor.set(value);
+  else if (id === 'paint-color') document.getElementById('csp-paint').style.background = value;
+  // sync preview
+  const cspId = 'csp-' + id.replace('-color','').replace('label-bg','lbg').replace('label-','l').replace('arrow-','arr').replace('amb-','').replace('bg','bg');
+  const prev = document.getElementById(cspId); if (prev) prev.style.background = value;
+});
+
+// ── MEASUREMENTS ─────────────────────────────────────────────────────────────
+function hexRgba(hex, a) { const c = hex.replace('#', ''); return `rgba(${parseInt(c.slice(0,2),16)},${parseInt(c.slice(2,4),16)},${parseInt(c.slice(4,6),16)},${a})`; }
+
+function buildArrow(entry) {
+  if (entry.group3d) scene.remove(entry.group3d);
+  const { p1, p2, style } = entry; const dist = p1.distanceTo(p2); if (dist < 0.0001) return;
+  const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
+  entry.mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(.5);
+  const ac = new THREE.Color('#' + style.arrowColor);
+  const hs = style.headLen ?? dist * .08, aw = style.headWid ?? dist * .04, tr = Math.max(0.01, style.thick * .05);
+  const grp = new THREE.Group();
+  if (style.arrowDir === 'out') {
+    const o1 = p1.clone().addScaledVector(dir, hs); grp.add(new THREE.ArrowHelper(dir.clone().negate(), o1, hs, ac.getHex(), hs, aw));
+    const o2 = p2.clone().addScaledVector(dir, -hs); grp.add(new THREE.ArrowHelper(dir.clone(), o2, hs, ac.getHex(), hs, aw));
+    const ss = p1.clone().addScaledVector(dir, hs), se = p2.clone().addScaledVector(dir, -hs);
+    if (ss.distanceTo(se) > .001) grp.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(ss, se), 1, tr, 8), new THREE.MeshBasicMaterial({ color: ac })));
+  } else if (style.arrowDir === 'in') {
+    const i1 = p1.clone().addScaledVector(dir, -hs); grp.add(new THREE.ArrowHelper(dir.clone(), i1, hs, ac.getHex(), hs, aw));
+    const i2 = p2.clone().addScaledVector(dir, hs); grp.add(new THREE.ArrowHelper(dir.clone().negate(), i2, hs, ac.getHex(), hs, aw));
+    grp.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(p1, p2), 1, tr, 8), new THREE.MeshBasicMaterial({ color: ac })));
+  } else { grp.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(p1, p2), 1, tr, 8), new THREE.MeshBasicMaterial({ color: ac }))); }
+
+  const hR = Math.max(tr * 2, dist * .012);
+  const h1 = new THREE.Mesh(new THREE.SphereGeometry(hR, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffcc00, depthTest: false }));
+  h1.position.copy(p1); h1.renderOrder = 999;
+  const h2 = new THREE.Mesh(new THREE.SphereGeometry(hR, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffcc00, depthTest: false }));
+  h2.position.copy(p2); h2.renderOrder = 999;
+  h1.visible = h2.visible = (mode === 'measure' || mode === 'angle');
+  grp.add(h1, h2); entry.handles = [h1, h2];
+  scene.add(grp); entry.group3d = grp;
+  grp.visible = entry.visible !== false;
+}
+function buildLabel(entry) {
+  if (!entry.labelEl) { const el = document.createElement('div'); el.className = 'meas-html-label'; wrap.appendChild(el); entry.labelEl = el; }
+  const el = entry.labelEl, s = entry.style;
+  el.textContent = entry.label; el.style.fontSize = s.fontSize + 'px'; el.style.color = s.textColor;
+  el.style.background = hexRgba(s.bgColor, s.bgOpacity / 100); el.style.padding = '2px 8px'; el.style.borderRadius = '3px';
+}
+function addMeasurement(p1, p2) {
+  const dist = p1.distanceTo(p2);
+  const over = document.getElementById('meas-text-override').value.trim();
+  const label = over || `${dist.toFixed(2)} mm`;
+  const _labelOverride = over || null;
+  const style = {
+    arrowColor: document.getElementById('arrow-color').value.replace('#', ''),
+    thick: +document.getElementById('arrow-thickness').value,
+    headLen: +document.getElementById('arrow-head-len').value || null,
+    headWid: +document.getElementById('arrow-head-wid').value || null,
+    arrowDir: document.getElementById('arrow-dir').value,
+    fontSize: +document.getElementById('label-size').value,
+    textColor: document.getElementById('label-color').value,
+    bgColor: document.getElementById('label-bg').value,
+    bgOpacity: +document.getElementById('label-bg-opacity').value,
+  };
+  const entry = { id: measNextId++, type: 'distance', name: 'Distance ' + measNextId, p1: p1.clone(), p2: p2.clone(), label, _labelOverride, dist, visible: true, style, group3d: null, labelEl: null, handles: [] };
+  buildArrow(entry); buildLabel(entry); measurements.push(entry); refreshMeasList(); refreshOutliner(); return entry;
+}
+function removeMeas(id) {
+  const idx = measurements.findIndex(m => m.id === id); if (idx < 0) return;
+  const m = measurements[idx];
+  if (gizmoHandleMeas === m) detachHandleGizmo();
+  if (m._group) { const g = m._group; g.members = g.members.filter(x => x !== m); if (g.members.length < 2) { g.members.forEach(x => x._group = null); measGroups = measGroups.filter(x => x !== g); } }
+  scene.remove(m.group3d); m.labelEl?.remove();
+  measMultiSel.delete(id);
+  measurements.splice(idx, 1); if (selectedMeas?.id === id) { selectedMeas = null; showPropertiesForSelection(); }
+  refreshOutliner();
+}
+function rebuildMeas(entry) {
+  entry.dist = entry.p1.distanceTo(entry.p2);
+  entry.label = entry._labelOverride || `${entry.dist.toFixed(2)} mm`;
+  buildArrow(entry); buildLabel(entry);
+  entry.group3d.visible = entry.visible !== false;
+  updateMeasHandleVis();
+}
+function rebuildMeasKeepGizmo(entry, hi) {
+  entry.dist = entry.p1.distanceTo(entry.p2);
+  entry.label = entry._labelOverride || `${entry.dist.toFixed(2)} mm`;
+  buildArrow(entry); buildLabel(entry);
+  entry.group3d.visible = entry.visible !== false;
+  if (gizmoHandle && gizmoHandleMeas === entry && entry.handles[hi]) {
+    gizmoHandle = entry.handles[hi];
+    tfCtrl.attach(gizmoHandle);
+  }
+  updateMeasHandleVis();
+  syncAnnotEditorLive(entry);
+}
+function rebuildAngleKeepGizmo(entry, hi) {
+  rebuildAngle(entry);
+  entry.group3d.visible = entry.visible !== false;
+  if (gizmoHandle && gizmoHandleMeas === entry && entry.handles[hi]) {
+    gizmoHandle = entry.handles[hi];
+    tfCtrl.attach(gizmoHandle);
+  }
+  updateMeasHandleVis();
+  syncAnnotEditorLive(entry);
+}
+
+// Live-update the open annotation editor fields when handles move via gizmo
+function syncAnnotEditorLive(m) {
+  if (selectedMeas !== m) return;
+  const body = document.getElementById('annot-prop-body'); if (!body) return;
+  const setF = (cls, val) => { const inp = body.querySelector(`.${cls} .dn-input`); if (inp) { inp.value = (+val).toFixed(2); const dn = inp.closest('.dn'); const mn = parseFloat(dn.dataset.min), mx = parseFloat(dn.dataset.max); const tr = dn.querySelector('.dn-track'); if (tr) tr.style.width = Math.max(0, Math.min(100, (val - mn) / (mx - mn) * 100)) + '%'; } };
+  if (m.type === 'angle') {
+    setF('me-p1x', m.p1.x); setF('me-p1y', m.p1.y); setF('me-p1z', m.p1.z);
+    setF('me-apx', m.apex.x); setF('me-apy', m.apex.y); setF('me-apz', m.apex.z);
+    setF('me-p2x', m.p2.x); setF('me-p2y', m.p2.y); setF('me-p2z', m.p2.z);
+  } else {
+    setF('me-p1x', m.p1.x); setF('me-p1y', m.p1.y); setF('me-p1z', m.p1.z);
+    setF('me-p2x', m.p2.x); setF('me-p2y', m.p2.y); setF('me-p2z', m.p2.z);
+  }
+  // Update the label field if it shows the auto value (no override)
+  if (!m._labelOverride) { const lab = body.querySelector('.me-label'); if (lab && document.activeElement !== lab) lab.placeholder = m.type === 'angle' ? `auto (${m.angleDeg?.toFixed(2)}°)` : `auto (${m.dist?.toFixed(2)} mm)`; }
+  const t = document.getElementById('annot-prop-title'); if (t) t.textContent = (m.name || m.label);
+}
+function detachHandleGizmo() {
+  if (gizmoHandle) { tfCtrl.detach(); gizmoHandle = null; gizmoHandleMeas = null; }
+}
+
+// ── ANGLE MEASUREMENT ────────────────────────────────────────────────────────
+function addAngleMeasurement(p1, apex, p2) {
+  const v1 = new THREE.Vector3().subVectors(p1, apex).normalize();
+  const v2 = new THREE.Vector3().subVectors(p2, apex).normalize();
+  const angleDeg = THREE.MathUtils.radToDeg(Math.acos(Math.max(-1, Math.min(1, v1.dot(v2)))));
+  const over = document.getElementById('meas-text-override').value.trim();
+  const label = over || `${angleDeg.toFixed(2)}°`;
+  const _labelOverride = over || null;
+  const style = {
+    arrowColor: document.getElementById('arrow-color').value.replace('#',''),
+    thick: +document.getElementById('arrow-thickness').value,
+    fontSize: +document.getElementById('label-size').value,
+    textColor: document.getElementById('label-color').value,
+    bgColor: document.getElementById('label-bg').value,
+    bgOpacity: +document.getElementById('label-bg-opacity').value,
+  };
+  const entry = { id: measNextId++, type:'angle', name:'Angle '+measNextId,
+    p1: p1.clone(), apex: apex.clone(), p2: p2.clone(),
+    angleDeg, label, _labelOverride, visible: true, style, group3d: null, labelEl: null, handles: [] };
+  buildAngle(entry); buildAngleLabel(entry);
+  measurements.push(entry); refreshMeasList(); refreshOutliner(); return entry;
+}
+
+function buildAngle(entry) {
+  if (entry.group3d) scene.remove(entry.group3d);
+  const { p1, apex, p2, style } = entry;
+  const ac = new THREE.Color('#' + style.arrowColor);
+  const tr = Math.max(0.01, style.thick * .05);
+  const grp = new THREE.Group();
+
+  // Two lines from apex to p1 and p2
+  const makeArm = (from, to) => {
+    const path = new THREE.LineCurve3(from, to);
+    return new THREE.Mesh(new THREE.TubeGeometry(path, 1, tr, 6), new THREE.MeshBasicMaterial({ color: ac }));
+  };
+  grp.add(makeArm(apex, p1)); grp.add(makeArm(apex, p2));
+
+  // Arc in the angle plane
+  const v1 = new THREE.Vector3().subVectors(p1, apex).normalize();
+  const v2 = new THREE.Vector3().subVectors(p2, apex).normalize();
+  const arcR = Math.min(apex.distanceTo(p1), apex.distanceTo(p2)) * 0.35;
+  const normal = new THREE.Vector3().crossVectors(v1, v2).normalize();
+  if (normal.lengthSq() > 0.001) {
+    const angleRad = Math.acos(Math.max(-1, Math.min(1, v1.dot(v2))));
+    const segs = Math.max(16, Math.round(angleRad * 28));
+    const arcPts = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const q = new THREE.Quaternion().setFromAxisAngle(normal, angleRad * t);
+      arcPts.push(v1.clone().applyQuaternion(q).multiplyScalar(arcR).add(apex));
+    }
+    const arcPath = new THREE.CatmullRomCurve3(arcPts);
+    grp.add(new THREE.Mesh(new THREE.TubeGeometry(arcPath, segs, tr * 0.7, 6), new THREE.MeshBasicMaterial({ color: ac })));
+    entry.mid = arcPts[Math.floor(segs / 2)].clone();
+    // Optional arrowheads at the arc ends (tangent to the arc)
+    const ah = style.arcHeads || 'none';
+    if (ah !== 'none') {
+      const hLen = arcR * 0.28, hWid = arcR * 0.16;
+      // tangent at start (i=0) and end (i=segs)
+      const tanStart = new THREE.Vector3().subVectors(arcPts[1], arcPts[0]).normalize();
+      const tanEnd   = new THREE.Vector3().subVectors(arcPts[segs], arcPts[segs-1]).normalize();
+      // 'out' = heads point along arc travel (start backwards, end forwards)
+      // 'in'  = heads point toward each other (start forwards, end backwards)
+      const dirStart = ah === 'out' ? tanStart.clone().negate() : tanStart.clone();
+      const dirEnd   = ah === 'out' ? tanEnd.clone()            : tanEnd.clone().negate();
+      grp.add(new THREE.ArrowHelper(dirStart, arcPts[0],    hLen, ac.getHex(), hLen, hWid));
+      grp.add(new THREE.ArrowHelper(dirEnd,   arcPts[segs], hLen, ac.getHex(), hLen, hWid));
+    }
+  } else {
+    entry.mid = apex.clone().add(v1.clone().multiplyScalar(arcR));
+  }
+
+  // Draggable handles (p1=0, apex=1, p2=2)
+  const hR = Math.max(tr * 2.5, arcR * 0.08);
+  const mkH = (pos, col) => {
+    const h = new THREE.Mesh(new THREE.SphereGeometry(hR, 8, 6), new THREE.MeshBasicMaterial({ color: col, depthTest: false }));
+    h.position.copy(pos); h.renderOrder = 999; return h;
+  };
+  const h1 = mkH(p1, 0xffcc00), h2 = mkH(apex, 0xff8800), h3 = mkH(p2, 0xffcc00);
+  h1.visible = h2.visible = h3.visible = (mode === 'measure' || mode === 'angle');
+  grp.add(h1, h2, h3); entry.handles = [h1, h2, h3];
+  scene.add(grp); entry.group3d = grp;
+  grp.visible = entry.visible !== false;
+}
+
+function buildAngleLabel(entry) {
+  if (!entry.labelEl) { const el = document.createElement('div'); el.className = 'meas-html-label'; wrap.appendChild(el); entry.labelEl = el; }
+  const el = entry.labelEl, s = entry.style;
+  el.textContent = entry.label; el.style.fontSize = s.fontSize + 'px'; el.style.color = s.textColor;
+  el.style.background = hexRgba(s.bgColor, s.bgOpacity / 100); el.style.padding = '2px 8px'; el.style.borderRadius = '3px';
+}
+
+function rebuildAngle(entry) {
+  const v1 = new THREE.Vector3().subVectors(entry.p1, entry.apex).normalize();
+  const v2 = new THREE.Vector3().subVectors(entry.p2, entry.apex).normalize();
+  entry.angleDeg = THREE.MathUtils.radToDeg(Math.acos(Math.max(-1, Math.min(1, v1.dot(v2)))));
+  entry.label = entry._labelOverride || `${entry.angleDeg.toFixed(2)}°`;
+  buildAngle(entry); buildAngleLabel(entry);
+  entry.group3d.visible = entry.visible !== false;
+  updateMeasHandleVis();
+}
+
+
+function updateMeasHandleVis() {
+  const placing = (mode === 'measure' || mode === 'angle');
+  measurements.forEach(m => {
+    const showThis = (placing || (mode === 'select' && selectedMeas === m)) && m.visible !== false;
+    m.handles?.forEach(h => { h.visible = showThis; });
+  });
+}
+function updateMeasLabels() {
+  const rect = wrap.getBoundingClientRect(), cam = usingRenderCam ? renderCam : activeCam;
+  measurements.forEach(m => { if (!m.labelEl || !m.mid) return; if (m.visible === false) { m.labelEl.style.display='none'; return; } const v = m.mid.clone().project(cam); m.labelEl.style.left = ((v.x * .5 + .5) * rect.width) + 'px'; m.labelEl.style.top = ((-v.y * .5 + .5) * rect.height) + 'px'; });
+}
+function refreshMeasList() {
+  // Annotations are listed in the Scene outliner now; keep selection in sync
+  if (selectedMeas && !measurements.includes(selectedMeas)) selectedMeas = null;
+  refreshOutliner();
+}
+
+// Show the editor for the selected annotation in the contextual props panel
+function showAnnotProperties(m) {
+  document.querySelectorAll('.props-pane').forEach(p => p.style.display = 'none');
+  document.getElementById('props-annot').style.display = '';
+  const icon = m.type === 'angle' ? '📐' : '📏';
+  document.getElementById('annot-prop-title').textContent = (m.name || m.label);
+  const body = document.getElementById('annot-prop-body');
+  body.innerHTML = '';
+  if (m.type === 'angle') showAngleEditor(m, body); else showMeasEditor(m, body);
+}
+
+function showMeasEditor(m, container) {
+  const s = m.style, d = m.p1.distanceTo(m.p2);
+  const hl = s.headLen ?? +(d * .08).toFixed(2), hw = s.headWid ?? +(d * .04).toFixed(2);
+  const ed = document.createElement('div'); ed.className = 'meas-editor';
+  const r = (lbl, inner) => `<div style="display:flex;align-items:center;gap:4px;min-height:22px"><span style="color:var(--b7);font-size:11px;min-width:66px;flex-shrink:0">${lbl}</span>${inner}</div>`;
+  const dn = (cls, mn, mx, st, v) => { const pct = Math.max(0, Math.min(100, (v-mn)/(mx-mn)*100)); const fmt = st>=1?Math.round(v):v.toFixed(2); return `<div class="dn ${cls}" data-min="${mn}" data-max="${mx}" data-step="${st}" style="flex:1"><div class="dn-track" style="width:${pct}%"></div><input class="dn-input" type="text" value="${fmt}"></div>`; };
+  const sw = (cls, val) => `<div class="color-swatch ${cls}" style="flex:1"><input type="color" value="${val}"><div class="color-swatch-preview" style="background:${val}"></div></div>`;
+  const sel = (cls, opts, cur) => `<select class="${cls}" style="flex:1">${opts.map(([v,t]) => `<option value="${v}"${cur===v?' selected':''}>${t}</option>`).join('')}</select>`;
+  ed.innerHTML = `
+    ${r('Name','<input type="text" class="me-name" value="'+(m.name||m.label).replace(/"/g,'&quot;')+'" style="flex:1;background:var(--b3);border:1px solid var(--b4);color:var(--b8);padding:2px 5px;border-radius:3px;font-size:11px;outline:none">')}
+    ${r('Label','<input type="text" class="me-label" value="'+(m._labelOverride||'').replace(/"/g,'&quot;')+'" placeholder="auto (distance)" style="flex:1;background:var(--b3);border:1px solid var(--b4);color:var(--b8);padding:2px 5px;border-radius:3px;font-size:11px;outline:none">')}
+    ${r('Thickness', dn('me-thick',0.1,50,.5,s.thick))}
+    ${r('Head len',  dn('me-hl',0.1,200,1,hl))}
+    ${r('Head wid',  dn('me-hw',0.1,200,1,hw))}
+    ${r('Color',     sw('me-cs-arr','#'+s.arrowColor))}
+    ${r('Direction', sel('me-dir',[['out','Outward ←→'],['in','Inward →←'],['none','None']],s.arrowDir))}
+    ${r('Font size', dn('me-fs',6,72,1,s.fontSize))}
+    ${r('Text color',sw('me-cs-tc',s.textColor))}
+    ${r('BG color',  sw('me-cs-bg',s.bgColor))}
+    ${r('BG opacity',dn('me-bgo',0,100,1,s.bgOpacity))}
+    <div class="subsec-lbl" style="margin-top:4px">Endpoints</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px">
+      <div><span style="font-size:9px;color:var(--red)">P1 X</span>${dn('me-p1x',-1e6,1e6,.1,m.p1.x)}</div>
+      <div><span style="font-size:9px;color:var(--grn)">P1 Y</span>${dn('me-p1y',-1e6,1e6,.1,m.p1.y)}</div>
+      <div><span style="font-size:9px;color:var(--blu)">P1 Z</span>${dn('me-p1z',-1e6,1e6,.1,m.p1.z)}</div>
+      <div><span style="font-size:9px;color:var(--red)">P2 X</span>${dn('me-p2x',-1e6,1e6,.1,m.p2.x)}</div>
+      <div><span style="font-size:9px;color:var(--grn)">P2 Y</span>${dn('me-p2y',-1e6,1e6,.1,m.p2.y)}</div>
+      <div><span style="font-size:9px;color:var(--blu)">P2 Z</span>${dn('me-p2z',-1e6,1e6,.1,m.p2.z)}</div>
+    </div>
+    <button class="sm-btn danger w100" id="annot-del" style="margin-top:6px">Delete Annotation</button>`;
+  container.appendChild(ed);
+  initDNs(ed); initSwatches(ed);
+  ed.querySelector('#annot-del').addEventListener('click', () => { if (confirm(`Delete annotation "${m.name || m.label}"? This cannot be undone.`)) removeMeas(m.id); });
+  function apply() {
+    m.name  = ed.querySelector('.me-name')?.value || m.name || m.label;
+    const lv = ed.querySelector('.me-label').value.trim();
+    m._labelOverride = lv || null;
+    m.style.thick   = parseFloat(ed.querySelector('.me-thick .dn-input').value) || 1;
+    m.style.headLen = parseFloat(ed.querySelector('.me-hl .dn-input').value) || null;
+    m.style.headWid = parseFloat(ed.querySelector('.me-hw .dn-input').value) || null;
+    const ai = ed.querySelector('.me-cs-arr input[type=color]'); if (ai) m.style.arrowColor = ai.value.replace('#','');
+    m.style.arrowDir = ed.querySelector('.me-dir').value;
+    m.style.fontSize = parseFloat(ed.querySelector('.me-fs .dn-input').value) || 12;
+    const ti = ed.querySelector('.me-cs-tc input[type=color]'); if (ti) m.style.textColor = ti.value;
+    const bi = ed.querySelector('.me-cs-bg input[type=color]'); if (bi) m.style.bgColor = bi.value;
+    m.style.bgOpacity = parseFloat(ed.querySelector('.me-bgo .dn-input').value);
+    m.p1.set(parseFloat(ed.querySelector('.me-p1x .dn-input').value), parseFloat(ed.querySelector('.me-p1y .dn-input').value), parseFloat(ed.querySelector('.me-p1z .dn-input').value));
+    m.p2.set(parseFloat(ed.querySelector('.me-p2x .dn-input').value), parseFloat(ed.querySelector('.me-p2y .dn-input').value), parseFloat(ed.querySelector('.me-p2z .dn-input').value));
+    rebuildMeas(m);
+    const t = document.getElementById('annot-prop-title'); if (t) t.textContent = (m.name || m.label);
+    refreshOutliner();
+  }
+  ed.addEventListener('dnchange', e => { e.stopPropagation(); apply(); });
+  ed.addEventListener('swchange',  e => { e.stopPropagation(); apply(); });
+  ed.querySelectorAll('select,input[type=text]').forEach(inp => {
+    inp.addEventListener('input',   e => { e.stopPropagation(); apply(); });
+    inp.addEventListener('change',  e => { e.stopPropagation(); apply(); });
+    inp.addEventListener('click',       e => e.stopPropagation());
+    inp.addEventListener('pointerdown', e => e.stopPropagation());
+  });
+  ed.querySelectorAll('.color-swatch').forEach(s => { s.addEventListener('click', e => e.stopPropagation()); s.addEventListener('pointerdown', e => e.stopPropagation()); });
+}
+
+
+function showAngleEditor(m, container) {
+  const s = m.style;
+  const ed = document.createElement('div'); ed.className = 'meas-editor';
+  const r = (lbl, inner) => `<div style="display:flex;align-items:center;gap:4px;min-height:22px"><span style="color:var(--b7);font-size:11px;min-width:66px;flex-shrink:0">${lbl}</span>${inner}</div>`;
+  const dn = (cls, mn, mx, st, v) => { const pct = Math.max(0,Math.min(100,(v-mn)/(mx-mn)*100)); const fmt = st>=1?Math.round(v):v.toFixed(2); return `<div class="dn ${cls}" data-min="${mn}" data-max="${mx}" data-step="${st}" style="flex:1"><div class="dn-track" style="width:${pct}%"></div><input class="dn-input" type="text" value="${fmt}"></div>`; };
+  const sw = (cls, val) => `<div class="color-swatch ${cls}" style="flex:1"><input type="color" value="${val}"><div class="color-swatch-preview" style="background:${val}"></div></div>`;
+  const sel = (cls, opts, cur) => `<select class="${cls}" style="flex:1">${opts.map(([v,t]) => `<option value="${v}"${cur===v?' selected':''}>${t}</option>`).join('')}</select>`;
+  ed.innerHTML = `
+    ${r('Name','<input type="text" class="me-name" value="'+(m.name||m.label).replace(/"/g,'&quot;')+'" style="flex:1;background:var(--b3);border:1px solid var(--b4);color:var(--b8);padding:2px 5px;border-radius:3px;font-size:11px;outline:none">')}
+    ${r('Label','<input type="text" class="me-label" value="'+(m._labelOverride||'').replace(/"/g,'&quot;')+'" placeholder="auto (angle°)" style="flex:1;background:var(--b3);border:1px solid var(--b4);color:var(--b8);padding:2px 5px;border-radius:3px;font-size:11px;outline:none">')}
+    ${r('Thickness',dn('me-thick',0.1,50,.5,s.thick))}
+    ${r('Color',sw('me-cs-arr','#'+s.arrowColor))}
+    ${r('Font size',dn('me-fs',6,72,1,s.fontSize))}
+    ${r('Text color',sw('me-cs-tc',s.textColor))}
+    ${r('BG color',sw('me-cs-bg',s.bgColor))}
+    ${r('BG opacity',dn('me-bgo',0,100,1,s.bgOpacity))}
+    <div class="subsec-lbl" style="margin-top:4px">3 Points (drag handles in viewport)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px">
+      <div><span style="font-size:9px;color:var(--warn);font-weight:700">P1 X</span>${dn('me-p1x',-1e6,1e6,.1,m.p1.x)}</div>
+      <div><span style="font-size:9px;color:var(--warn)">P1 Y</span>${dn('me-p1y',-1e6,1e6,.1,m.p1.y)}</div>
+      <div><span style="font-size:9px;color:var(--warn)">P1 Z</span>${dn('me-p1z',-1e6,1e6,.1,m.p1.z)}</div>
+      <div><span style="font-size:9px;color:#ff8800;font-weight:700">Apex X</span>${dn('me-apx',-1e6,1e6,.1,m.apex.x)}</div>
+      <div><span style="font-size:9px;color:#ff8800">Apex Y</span>${dn('me-apy',-1e6,1e6,.1,m.apex.y)}</div>
+      <div><span style="font-size:9px;color:#ff8800">Apex Z</span>${dn('me-apz',-1e6,1e6,.1,m.apex.z)}</div>
+      <div><span style="font-size:9px;color:var(--warn);font-weight:700">P2 X</span>${dn('me-p2x',-1e6,1e6,.1,m.p2.x)}</div>
+      <div><span style="font-size:9px;color:var(--warn)">P2 Y</span>${dn('me-p2y',-1e6,1e6,.1,m.p2.y)}</div>
+      <div><span style="font-size:9px;color:var(--warn)">P2 Z</span>${dn('me-p2z',-1e6,1e6,.1,m.p2.z)}</div>
+    </div>
+    <button class="sm-btn danger w100" id="annot-del" style="margin-top:6px">Delete Annotation</button>`;
+  container.appendChild(ed);
+  initDNs(ed); initSwatches(ed);
+  ed.querySelector('#annot-del').addEventListener('click', () => { if (confirm(`Delete annotation "${m.name || m.label}"? This cannot be undone.`)) removeMeas(m.id); });
+  function apply() {
+    m.name  = ed.querySelector('.me-name').value || m.name || m.label;
+    const lv = ed.querySelector('.me-label').value.trim();
+    m._labelOverride = lv || null;
+    m.style.thick = parseFloat(ed.querySelector('.me-thick .dn-input').value)||1;
+    const ah=ed.querySelector('.me-archeads'); if(ah) m.style.arcHeads=ah.value;
+    const ai=ed.querySelector('.me-cs-arr input[type=color]'); if(ai) m.style.arrowColor=ai.value.replace('#','');
+    m.style.fontSize=parseFloat(ed.querySelector('.me-fs .dn-input').value)||12;
+    const ti=ed.querySelector('.me-cs-tc input[type=color]'); if(ti) m.style.textColor=ti.value;
+    const bi=ed.querySelector('.me-cs-bg input[type=color]'); if(bi) m.style.bgColor=bi.value;
+    m.style.bgOpacity=parseFloat(ed.querySelector('.me-bgo .dn-input').value);
+    m.p1.set(  parseFloat(ed.querySelector('.me-p1x .dn-input').value), parseFloat(ed.querySelector('.me-p1y .dn-input').value), parseFloat(ed.querySelector('.me-p1z .dn-input').value));
+    m.apex.set(parseFloat(ed.querySelector('.me-apx .dn-input').value), parseFloat(ed.querySelector('.me-apy .dn-input').value), parseFloat(ed.querySelector('.me-apz .dn-input').value));
+    m.p2.set(  parseFloat(ed.querySelector('.me-p2x .dn-input').value), parseFloat(ed.querySelector('.me-p2y .dn-input').value), parseFloat(ed.querySelector('.me-p2z .dn-input').value));
+    rebuildAngle(m);
+    const t = document.getElementById('annot-prop-title'); if (t) t.textContent = (m.name || m.label);
+    refreshOutliner();
+  }
+  ed.addEventListener('dnchange', e => { e.stopPropagation(); apply(); });
+  ed.addEventListener('swchange',  e => { e.stopPropagation(); apply(); });
+  ed.querySelectorAll('select,input[type=text]').forEach(inp => {
+    inp.addEventListener('input',  e=>{e.stopPropagation();apply();}); inp.addEventListener('change',e=>{e.stopPropagation();apply();});
+    inp.addEventListener('click',  e=>e.stopPropagation()); inp.addEventListener('pointerdown',e=>e.stopPropagation());
+  });
+  ed.querySelectorAll('.color-swatch').forEach(s=>{s.addEventListener('click',e=>e.stopPropagation());s.addEventListener('pointerdown',e=>e.stopPropagation());});
+}
+
+// ── SAVE / LOAD ───────────────────────────────────────────────────────────────
+function saveScene() {
+  const sm = mc => mc.map(({ mesh }) => ({ partName: mesh.userData.partName||'', color: '#'+mesh.material.color.getHexString(), metalness: mesh.material.metalness, roughness: mesh.material.roughness, positions: Array.from(mesh.geometry.attributes.position.array), normals: mesh.geometry.attributes.normal ? Array.from(mesh.geometry.attributes.normal.array) : null, indices: mesh.geometry.index ? Array.from(mesh.geometry.index.array) : null }));
+  const data = { version: 3, bg: '#' + new THREE.Color(scene.background).getHexString(),
+    objects: objects.map(obj => { const b = { name: obj.name, isGroup: obj.isGroup, position: obj.group.position.toArray(), rotation: [obj.group.rotation.x,obj.group.rotation.y,obj.group.rotation.z], scale: obj.group.scale.toArray() }; if (obj.isGroup && obj._children?.length) { b.children = obj._children.map(c => ({ name:c.name, position:c.group.position.toArray(), rotation:[c.group.rotation.x,c.group.rotation.y,c.group.rotation.z], scale:c.group.scale.toArray(), meshes:sm(c.meshChildren) })); b.meshes = []; } else { b.meshes = sm(obj.meshChildren); } return b; }),
+    measurements: measurements.map(m => m.type==='angle' ? { type:'angle', name:m.name, label:m.label, labelOverride:m._labelOverride, angleDeg:m.angleDeg, p1:m.p1.toArray(), apex:m.apex.toArray(), p2:m.p2.toArray(), style:m.style, visible:m.visible } : { label:m.label, name:m.name, labelOverride:m._labelOverride, dist:m.dist, p1:m.p1.toArray(), p2:m.p2.toArray(), style:m.style, visible:m.visible }),
+    lights: { ambient: { intensity:ambLight.intensity, sky:'#'+ambLight.color.getHexString(), ground:'#'+ambLight.groundColor.getHexString() }, directional: dirLights.map(l => ({ name:l.name, intensity:l.light.intensity, color:'#'+l.light.color.getHexString(), pos:l.light.position.toArray(), target:l.target.position.toArray(), visible:l.visible, gizmoVisible:l.gizmoVisible })) },
+    lightGroups: lightGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(l => dirLights.indexOf(l)) })),
+    measGroups:  measGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(m => measurements.indexOf(m)) })),
+    cameras: cameras.map(c => ({ kind:c.kind, name:c.name, visible:c.visible, gizmoVisible:c.gizmoVisible,
+      pos:c.pivot.position.toArray(), quat:c.pivot.quaternion.toArray(),
+      resX:c.resX, resY:c.resY, projection:c.projection, focalMode:c.focalMode, focalLength:c.focalLength,
+      fov:c.fov, orthoHeight:c.orthoHeight, clearance:c.clearance, scanDistance:c.scanDistance, fovMode:c.fovMode, fov3d:c.fov3d, fov3dMm:c.fov3dMm, pointMode:c.pointMode, captureNormals:c.captureNormals, renderBg:c.renderBg })),
+    camGroups: camGroups.map(g => ({ name:g.name, visible:g.visible, members:g.members.map(c => cameras.indexOf(c)) })) };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'scene.cadscene'; a.click();
+}
+document.getElementById('fi-scene').addEventListener('change', async e => {
+  const file = e.target.files[0]; if (!file) return; e.target.value = '';
+  try {
+    const data = JSON.parse(await file.text());
+    objects.forEach(o => scene.remove(o.group)); measurements.forEach(m => { scene.remove(m.group3d); m.labelEl?.remove(); });
+    dirLights.forEach(l => [l.light,l.target,l.pivot,l.line,l.helper].forEach(x => scene.remove(x)));
+    if (shownCamera) exitCameraView();
+    cameras.forEach(c => { scene.remove(c.pivot); scene.remove(c.helper); c.helper.dispose?.(); });
+    objects = []; measurements = []; dirLights = []; lightGroups = []; measGroups = [];
+    cameras = []; camGroups = [];
+    selected = null; selectedLight = null; selectedMeas = null; selectedCamera = null;
+    multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set(); camMultiSel = new Set();
+    cameraId = 1;
+    if (data.bg) { scene.background = new THREE.Color(data.bg); document.getElementById('bg-color').value = data.bg; document.getElementById('csp-bg').style.background = data.bg; }
+    function lm(grp, defs) { const mc = []; (defs||[]).forEach(md => { const mesh = mkMesh(new Float32Array(md.positions), md.normals?new Float32Array(md.normals):null, md.indices?new Uint32Array(md.indices):null, new THREE.Color(md.color)); mesh.userData.partName = md.partName; mesh.material.metalness = md.metalness??0.6; mesh.material.roughness = md.roughness??0.3; grp.add(mesh); mc.push({ mesh, originalColor: new THREE.Color(md.color), partName: md.partName }); }); return mc; }
+    data.objects?.forEach(od => { const grp = new THREE.Group(); grp.position.fromArray(od.position); grp.rotation.set(...od.rotation); grp.scale.fromArray(od.scale); if (od.isGroup&&od.children?.length) { const ch=[]; od.children.forEach(cd=>{const cg=new THREE.Group();cg.position.fromArray(cd.position);cg.rotation.set(...cd.rotation);cg.scale.fromArray(cd.scale);const cmc=lm(cg,cd.meshes);grp.add(cg);ch.push({id:nextId++,name:cd.name,group:cg,visible:true,meshChildren:cmc,isGroup:false,childIds:[],_children:[],_expanded:false});}); const allMC=ch.flatMap(c=>c.meshChildren); scene.add(grp); objects.push({id:nextId++,name:od.name,group:grp,visible:true,meshChildren:allMC,isGroup:true,childIds:ch.map(c=>c.id),_children:ch,_expanded:false}); } else { const mc=lm(grp,od.meshes); scene.add(grp); objects.push({id:nextId++,name:od.name,group:grp,visible:true,meshChildren:mc,isGroup:false,childIds:[],_children:[],_expanded:false}); } });
+    data.lights?.directional?.forEach(ld => { const e = makeDirLight(ld.pos, ld.target, ld.color, ld.intensity, false); if (ld.name) e.name = ld.name; if (ld.visible === false) e.visible = false; if (ld.gizmoVisible === false) e.gizmoVisible = false; updateLightMarker(e); });
+    if (data.lights?.ambient) { ambLight.intensity = data.lights.ambient.intensity ?? 1.5; if (data.lights.ambient.sky) ambLight.color.set(data.lights.ambient.sky); if (data.lights.ambient.ground) ambLight.groundColor.set(data.lights.ambient.ground); }
+    if (!dirLights.length) makeDirLight(undefined, undefined, undefined, undefined, false);
+    data.measurements?.forEach(md => {
+      if (md.type === 'angle') {
+        const entry={id:measNextId++,type:'angle',name:md.name||md.label,_labelOverride:md.labelOverride||null,p1:new THREE.Vector3(...md.p1),apex:new THREE.Vector3(...md.apex),p2:new THREE.Vector3(...md.p2),angleDeg:md.angleDeg,label:md.label,visible:md.visible!==false,style:{...md.style},group3d:null,labelEl:null,handles:[]};
+        buildAngle(entry); buildAngleLabel(entry); measurements.push(entry);
+      } else {
+        const entry={id:measNextId++,type:'distance',name:md.name||md.label,_labelOverride:md.labelOverride||null,p1:new THREE.Vector3(...md.p1),p2:new THREE.Vector3(...md.p2),label:md.label,dist:md.dist,visible:md.visible!==false,style:{...md.style},group3d:null,labelEl:null,handles:[]};
+        buildArrow(entry); buildLabel(entry); measurements.push(entry);
+      }
+    });
+    // Restore light groups
+    data.lightGroups?.forEach(g => { const members = (g.members||[]).map(i => dirLights[i]).filter(Boolean); if (members.length) { const lg = { id:'lg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(l => l._group = lg); lightGroups.push(lg); } });
+    // Restore measurement groups
+    data.measGroups?.forEach(g => { const members = (g.members||[]).map(i => measurements[i]).filter(Boolean); if (members.length) { const mg = { id:'mg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(m => m._group = mg); measGroups.push(mg); } });
+    // Restore cameras
+    data.cameras?.forEach(cd => {
+      const e = makeCamera(cd.kind, cd, false);
+      if (cd.name) e.name = cd.name;
+      if (cd.pos) e.pivot.position.fromArray(cd.pos);
+      if (cd.quat) e.pivot.quaternion.fromArray(cd.quat);
+      e.pivot.updateMatrixWorld(true);
+      if (cd.visible === false) e.visible = false;
+      if (cd.gizmoVisible === false) e.gizmoVisible = false;
+      applyCameraParams(e); updateCameraMarker(e);
+    });
+    // Restore camera groups
+    data.camGroups?.forEach(g => { const members = (g.members||[]).map(i => cameras[i]).filter(Boolean); if (members.length) { const cg = { id:'cg'+(groupId++), name:g.name, members, visible:g.visible!==false, _expanded:true }; members.forEach(c => c._group = cg); camGroups.push(cg); } });
+    tfCtrl.detach(); showPropertiesForSelection();
+    updateShadowCameras();
+    refreshOutliner(); updateStatus();
+  } catch (err) { alert('Load error: ' + err.message); console.error(err); }
+});
+
+// ── VIEWPORT LABEL ────────────────────────────────────────────────────────────
+function setVP(s) { document.getElementById('vp-label').textContent = s; }
+
+// ── NUMPAD VIEWS ──────────────────────────────────────────────────────────────
+const VIEWS = { front:{pos:[0,-1,0],up:[0,0,1]}, back:{pos:[0,1,0],up:[0,0,1]}, right:{pos:[1,0,0],up:[0,0,1]}, left:{pos:[-1,0,0],up:[0,0,1]}, top:{pos:[0,0,1],up:[0,1,0]}, bottom:{pos:[0,0,-1],up:[0,1,0]} };
+function applyView(name, label) {
+  const v = VIEWS[name]; if (!v) return;
+  const tgt = orbit.target.clone(), d = Math.max(perspCam.position.distanceTo(tgt), 100);
+  orthoCam.position.copy(tgt).addScaledVector(new THREE.Vector3(...v.pos), d);
+  orthoCam.up.set(...v.up); orthoCam.lookAt(tgt); orbit.target.copy(tgt);
+  isOrtho = true; usingRenderCam = false; activeCam = orthoCam;
+  orbit.object = orthoCam; orbit.enabled = true; tfCtrl.camera = orthoCam;
+  setOrthoFrustum(); orbit.update(); setVP(label);
+  document.getElementById('btn-ortho').classList.add('active');
+  document.getElementById('btn-persp').classList.remove('active');
+}
+function orbitD(az, el) {
+  const tgt = orbit.target.clone(), cam = usingRenderCam ? renderCam : activeCam;
+  const off = cam.position.clone().sub(tgt), sp = new THREE.Spherical().setFromVector3(off);
+  sp.theta += THREE.MathUtils.degToRad(az); sp.phi -= THREE.MathUtils.degToRad(el);
+  sp.phi = Math.max(.01, Math.min(Math.PI - .01, sp.phi));
+  off.setFromSpherical(sp); cam.position.copy(tgt).add(off); cam.lookAt(tgt);
+  orbit.update(); if (isOrtho) setOrthoFrustum();
+}
+
+// ── KEYBOARD ──────────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  const tag = e.target.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.key === 'Control') { tfCtrl.setTranslationSnap(1); tfCtrl.setRotationSnap(THREE.MathUtils.degToRad(5)); tfCtrl.setScaleSnap(.1); document.getElementById('snap-label').style.display = ''; }
+  if (!e.ctrlKey) {
+    if (e.key === 'q' || e.key === 'Q') setMode('select');
+    if (e.key === 'e' || e.key === 'E') setMode('edit');
+    if (e.key === 'm' || e.key === 'M') setMode('measure');
+    if (e.key === 'g' || e.key === 'G') setGridVis(!grid.visible);
+    if (e.key === 'f' || e.key === 'F') { if (selected) fitToView(selected.group); }
+    if (e.key === 'Delete' || e.key === 'Backspace') { if (selected || selectedLight || selectedMeas) { e.preventDefault(); deleteSelection(); } }
+    if (e.key === 'w') setGizmo('translate'); if (e.key === 'r') setGizmo('rotate'); if (e.key === 's') setGizmo('scale');
+    if (e.key === 'Tab') { e.preventDefault(); document.getElementById('rp-toggle').click(); }
+  }
+  const c = e.code;
+  if (c==='Numpad1'&&!e.ctrlKey){applyView('front','Front');e.preventDefault();}
+  if (c==='Numpad1'&&e.ctrlKey) {applyView('back','Back');e.preventDefault();}
+  if (c==='Numpad3'&&!e.ctrlKey){applyView('right','Right');e.preventDefault();}
+  if (c==='Numpad3'&&e.ctrlKey) {applyView('left','Left');e.preventDefault();}
+  if (c==='Numpad7'&&!e.ctrlKey){applyView('top','Top');e.preventDefault();}
+  if (c==='Numpad7'&&e.ctrlKey) {applyView('bottom','Bottom');e.preventDefault();}
+  if (c==='Numpad0'){usingRenderCam=!usingRenderCam;orbit.enabled=!usingRenderCam;setVP(usingRenderCam?'Camera':'Perspective');if(!usingRenderCam)switchCam(isOrtho);e.preventDefault();}
+  if (c==='Numpad5'){switchCam(!isOrtho);e.preventDefault();}
+  if (c==='Numpad9'){orbitD(180,0);e.preventDefault();}
+  if (c==='Numpad2'){orbitD(0,-15);e.preventDefault();} if (c==='Numpad8'){orbitD(0,15);e.preventDefault();}
+  if (c==='Numpad4'){orbitD(15,0);e.preventDefault();} if (c==='Numpad6'){orbitD(-15,0);e.preventDefault();}
+  if (c==='NumpadDecimal'){if(selected)fitToView(selected.group);else fitAll();e.preventDefault();}
+  if (c==='NumpadDivide'){e.preventDefault();if(!selected)return;if(!localViewActive){localViewHidden=objects.filter(o=>o!==selected).map(o=>{o.group.visible=false;return o;});localViewActive=true;setVP('Local');}else{localViewHidden.forEach(o=>{o.group.visible=o.visible;});localViewHidden=[];localViewActive=false;setVP(isOrtho?'Orthographic':'Perspective');}}
+});
+window.addEventListener('keydown', e => { if (e.key === 'Escape') { if (document.getElementById('render-modal').style.display === 'flex') hideRenderModal(); else if (shownCamera) exitCameraView(); } });
+window.addEventListener('keyup', e => {
+  if (e.key === 'Control') { tfCtrl.setTranslationSnap(null); tfCtrl.setRotationSnap(null); tfCtrl.setScaleSnap(null); document.getElementById('snap-label').style.display = 'none'; }
+});
+window.addEventListener('keydown', e => { if ((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();saveScene();} if ((e.ctrlKey||e.metaKey)&&e.key==='o'){e.preventDefault();document.getElementById('fi-scene').click();} if ((e.ctrlKey||e.metaKey)&&e.key==='n'){e.preventDefault();newScene();} });
+
+// ── MENU BAR ──────────────────────────────────────────────────────────────────
+// Menu: close on click outside, open on click on menu-item label
+function closeMenus() { document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('active')); }
+document.addEventListener('click', e => { if (!e.target.closest('.menu-item')) closeMenus(); });
+document.querySelectorAll('.menu-item').forEach(mi => {
+  // Click on the label (not a drop entry) toggles the menu open/close
+  mi.addEventListener('click', e => {
+    if (e.target.closest('.menu-entry')) return; // let entry handle it
+    e.stopPropagation();
+    const was = mi.classList.contains('active');
+    closeMenus();
+    if (!was) mi.classList.add('active');
+  });
+});
+// ── PRIMITIVES ────────────────────────────────────────────────────────────────
+function addPrimitive(kind) {
+  let geo, name;
+  switch (kind) {
+    case 'box':      geo = new THREE.BoxGeometry(50, 50, 50); name = 'Box'; break;
+    case 'sphere':   geo = new THREE.SphereGeometry(30, 32, 24); name = 'Sphere'; break;
+    case 'cylinder': geo = new THREE.CylinderGeometry(25, 25, 60, 32); geo.rotateX(Math.PI/2); name = 'Cylinder'; break;
+    case 'plane':    geo = new THREE.PlaneGeometry(80, 80); name = 'Plane'; break;
+    case 'cone':     geo = new THREE.ConeGeometry(30, 60, 32); geo.rotateX(Math.PI/2); name = 'Cone'; break;
+    case 'torus':    geo = new THREE.TorusGeometry(30, 10, 16, 48); name = 'Torus'; break;
+    default: return;
+  }
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, metalness: 0.4, roughness: 0.55, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geo, mat); mesh.castShadow = mesh.receiveShadow = true; mesh.userData.partName = name;
+  const grp = new THREE.Group(); grp.add(mesh);
+  const mc2 = [{ mesh, originalColor: new THREE.Color(0x9aa0a6), partName: name }];
+  // unique name
+  let n = name, i = 1; while (objects.some(o => o.name === n)) n = name + ' ' + (++i);
+  addObject(n, grp, mc2);
+}
+
+// ── NEW SCENE ─────────────────────────────────────────────────────────────────
+function newScene() {
+  if (objects.length || dirLights.length || measurements.length || cameras.length) {
+    if (!confirm('Start a new scene? All unsaved changes will be lost.')) return;
+  }
+  if (shownCamera) exitCameraView();
+  objects.forEach(o => scene.remove(o.group));
+  measurements.forEach(m => { scene.remove(m.group3d); m.labelEl?.remove(); });
+  dirLights.forEach(l => [l.light, l.target, l.pivot, l.line, l.helper].forEach(x => scene.remove(x)));
+  cameras.forEach(c => { scene.remove(c.pivot); scene.remove(c.helper); c.helper.dispose?.(); });
+  objects = []; measurements = []; dirLights = []; cameras = [];
+  lightGroups = []; measGroups = []; camGroups = [];
+  selected = null; selectedLight = null; selectedMeas = null; selectedCamera = null;
+  multiSel = new Set(); lightMultiSel = new Set(); measMultiSel = new Set(); camMultiSel = new Set();
+  measPts = []; angMeasPts = [];
+  detachHandleGizmo(); tfCtrl.detach();
+  scene.background = new THREE.Color(0x1b1b1b);
+  document.getElementById('bg-color').value = '#1b1b1b';
+  document.getElementById('csp-bg').style.background = '#1b1b1b';
+  nextId = 1; measNextId = 1; lightId = 1; cameraId = 1; groupId = 1;
+  makeDirLight(undefined, undefined, undefined, undefined, false); // seed one light, no auto-select
+  setSelected(null); showPropertiesForSelection();
+  refreshOutliner(); updateStatus();
+  setMode('select');
+}
+
+function mc(id, fn) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', e => { e.stopPropagation(); closeMenus(); fn(); });
+}
+mc('mi-new', newScene);
+mc('mi-add-dirlight', () => makeDirLight());
+mc('mi-add-box',      () => addPrimitive('box'));
+mc('mi-add-sphere',   () => addPrimitive('sphere'));
+mc('mi-add-cylinder', () => addPrimitive('cylinder'));
+mc('mi-add-plane',    () => addPrimitive('plane'));
+mc('mi-add-cone',     () => addPrimitive('cone'));
+mc('mi-add-torus',    () => addPrimitive('torus'));
+mc('mi-add-cam2d',    () => makeCamera('2d'));
+mc('mi-add-cam3d',    () => makeCamera('3d'));
+mc('mi-save', saveScene);
+mc('mi-open', () => document.getElementById('fi-scene').click());
+mc('mi-imp-step', () => document.getElementById('fi-step').click());
+mc('mi-imp-gltf', () => document.getElementById('fi-gltf').click());
+mc('mi-imp-obj',  () => document.getElementById('fi-obj').click());
+mc('mi-persp', () => switchCam(false));
+mc('mi-ortho', () => switchCam(true));
+mc('mi-frame', () => { if (selected) fitToView(selected.group); });
+mc('mi-frame-all', fitAll);
+mc('mi-grid', () => setGridVis(!grid.visible));
+
+// Header + toolbar
+document.getElementById('btn-persp').onclick = () => switchCam(false);
+document.getElementById('btn-ortho').onclick = () => switchCam(true);
+document.getElementById('btn-grid').onclick  = () => setGridVis(!grid.visible);
+document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.querySelectorAll('.tool-btn[data-gizmo]').forEach(b => b.addEventListener('click', () => setGizmo(b.dataset.gizmo)));
+
+// File inputs
+['fi-step','fi-gltf','fi-obj'].forEach(id => document.getElementById(id).addEventListener('change', async e => { const f = e.target.files[0]; if (f) { e.target.value = ''; await loadFile(f); } }));
+
+// Section collapse
+document.addEventListener('click', e => {
+  const head = e.target.closest('.rp-sec-head'); if (!head) return;
+  if (e.target.closest('button')) return;
+  const id = head.dataset.sec; const body = document.getElementById('sec-' + id); if (!body) return;
+  body.classList.toggle('hidden'); head.querySelector('.rp-chev').textContent = body.classList.contains('hidden') ? '▸' : '▾';
+});
+
+// Panel toggle
+const rPanel = document.getElementById('rpanel'), rpToggle = document.getElementById('rp-toggle');
+rpToggle.onclick = () => { rPanel.classList.toggle('collapsed'); rpToggle.textContent = rPanel.classList.contains('collapsed') ? '◀' : '▶'; rpToggle.style.right = rPanel.classList.contains('collapsed') ? '0' : 'var(--rpanel-w)'; setTimeout(resize, 220); };
+
+// Delete button
+document.getElementById('btn-delete').addEventListener('click', () => deleteSelection());
+
+// Unified delete for whatever is selected (object(s), light, or annotation),
+// always asking the user to confirm first.
+function deleteSelection() {
+  if (selected) {
+    const toD = multiSel.size > 1 ? objects.filter(o => multiSel.has(o.id)) : [selected];
+    const what = toD.length > 1 ? `these ${toD.length} objects` : `"${toD[0].name}"`;
+    if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
+    toD.forEach(obj => { scene.remove(obj.group); objects.splice(objects.indexOf(obj), 1); });
+    tfCtrl.detach(); selected = null; multiSel = new Set(); refreshOutliner(); refreshPropsTab(); updateStatus();
+  } else if (selectedLight) {
+    if (!confirm(`Delete light "${selectedLight.name}"? This cannot be undone.`)) return;
+    deleteLight(selectedLight);
+  } else if (selectedMeas) {
+    if (!confirm(`Delete annotation "${selectedMeas.name || selectedMeas.label}"? This cannot be undone.`)) return;
+    removeMeas(selectedMeas.id);
+  }
+}
+
+// Split panel resize
+const rpResize = document.getElementById('rp-resize'), rpTop = document.getElementById('rp-top');
+let rpDrag = false, rpStartY = 0, rpStartH = 0;
+rpResize.addEventListener('pointerdown', e => { rpDrag = true; rpStartY = e.clientY; rpStartH = rpTop.offsetHeight; rpResize.setPointerCapture(e.pointerId); rpResize.classList.add('dragging'); document.body.style.userSelect = 'none'; e.stopPropagation(); });
+document.addEventListener('pointermove', e => { if (!rpDrag) return; const dy = e.clientY - rpStartY; const total = document.getElementById('rpanel').offsetHeight; const newH = Math.max(80, Math.min(total - 120, rpStartH + dy)); rpTop.style.flex = 'none'; rpTop.style.height = newH + 'px'; });
+document.addEventListener('pointerup', () => { if (rpDrag) { rpDrag = false; rpResize.classList.remove('dragging'); document.body.style.userSelect = ''; } });
+
+// Status
+function updateStatus() { document.getElementById('st-objs').textContent = objects.length; document.getElementById('st-sel').textContent = selected ? selected.name + (multiSel.size > 1 ? ` +${multiSel.size-1}` : '') : '—'; }
+
+// ── DRAG-NUMBER WIDGET ────────────────────────────────────────────────────────
+function makeDN(dn) {
+  const inp = dn.querySelector('.dn-input'), track = dn.querySelector('.dn-track');
+  const mn = parseFloat(dn.dataset.min ?? '-1e9'), mx = parseFloat(dn.dataset.max ?? '1e9'), st = parseFloat(dn.dataset.step ?? '1');
+  const pct = v => Math.max(0, Math.min(100, (v - mn) / (mx - mn) * 100));
+  const fmt = v => st >= 1 ? Math.round(v) + '' : (st < 0.01 ? v.toFixed(3) : v.toFixed(2));
+  function set(v) { v = Math.max(mn, Math.min(mx, v)); inp.value = fmt(v); if (track) track.style.width = pct(v) + '%'; dn.dispatchEvent(new CustomEvent('dnchange', { bubbles: true, detail: { field: dn.dataset.tf, value: v } })); }
+  set(parseFloat(inp.value) || 0);
+  inp.addEventListener('focus', () => inp.select());
+  inp.addEventListener('change', () => set(parseFloat(inp.value) || 0));
+  inp.addEventListener('keydown', e => { if (e.key === 'ArrowUp') { e.preventDefault(); set(parseFloat(inp.value||0) + st); } if (e.key === 'ArrowDown') { e.preventDefault(); set(parseFloat(inp.value||0) - st); } if (e.key === 'Enter') inp.blur(); });
+  let dg = false, sx = 0, sv = 0, hm = false;
+  dn.addEventListener('pointerdown', e => {
+    if (e.target === inp) return; // let text input work normally
+    e.preventDefault(); e.stopPropagation(); // prevent viewport selection
+    dg = true; hm = false; sx = e.clientX; sv = parseFloat(inp.value || 0);
+    dn.setPointerCapture(e.pointerId); document.body.style.userSelect = 'none'; inp.style.cursor = 'ew-resize';
+  });
+  dn.addEventListener('pointermove', e => { if (!dg) return; e.stopPropagation(); const dx = e.clientX - sx; if (Math.abs(dx) > 2) hm = true; if (hm) set(sv + dx * st * 0.5); });
+  dn.addEventListener('pointerup', e => { if (!dg) return; dg = false; document.body.style.userSelect = ''; inp.style.cursor = ''; if (!hm) { inp.focus(); inp.select(); } });
+  dn._dnInit = true;
+  return { set, get: () => parseFloat(inp.value) || 0 };
+}
+function initDNs(root = document) { root.querySelectorAll('.dn').forEach(dn => { if (!dn._dnInit) makeDN(dn); }); }
+
+// ── COLOR SWATCH WIDGET ───────────────────────────────────────────────────────
+function initSwatches(root = document) {
+  root.querySelectorAll('.color-swatch').forEach(sw => {
+    if (sw._swInit) return; sw._swInit = true;
+    const inp = sw.querySelector('input[type=color]'), prev = sw.querySelector('.color-swatch-preview');
+    if (!inp) return;
+    inp.addEventListener('input', () => { if (prev) prev.style.background = inp.value; sw.dispatchEvent(new CustomEvent('swchange', { bubbles: true, detail: { id: inp.id, value: inp.value } })); });
+    sw.addEventListener('click', e => { if (e.target !== inp) { e.stopPropagation(); inp.click(); } });
+  });
+}
+
+// Dimension inputs: commit on Enter / blur, revert on Escape
+['x','y','z'].forEach(axis => {
+  const inp = document.getElementById('dim-' + axis); if (!inp) return;
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { updateDimReadout(); inp.blur(); } e.stopPropagation(); });
+  inp.addEventListener('change', () => applyDimEdit(axis));
+  inp.addEventListener('focus', () => inp.select());
+  inp.addEventListener('pointerdown', e => e.stopPropagation());
+});
+
+// Shadow toggle
+{
+  const st = document.getElementById('shadow-toggle');
+  if (st) st.addEventListener('change', () => setShadowsEnabled(st.checked));
+}
+
+// Camera view bar + render modal wiring
+{
+  const exitBtn = document.getElementById('cam-view-exit');
+  if (exitBtn) exitBtn.addEventListener('click', () => exitCameraView());
+  const renderBtn = document.getElementById('cam-view-render');
+  if (renderBtn) renderBtn.addEventListener('click', () => { if (shownCamera) { if (shownCamera.kind === '3d') renderPointCloud(shownCamera); else renderCameraImage(shownCamera, { transparentBg: shownCamera.renderBg === false }); } });
+  const closeBtn = document.getElementById('render-modal-close');
+  if (closeBtn) closeBtn.addEventListener('click', () => hideRenderModal());
+  const modal = document.getElementById('render-modal');
+  if (modal) modal.addEventListener('click', e => { if (e.target === modal) hideRenderModal(); });
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+initDNs();
+initSwatches();
+makeDirLight(undefined, undefined, undefined, undefined, false); // seed light, don't auto-select
+showPropertiesForSelection();
+refreshOutliner();
+updateStatus();
+
+animate();
